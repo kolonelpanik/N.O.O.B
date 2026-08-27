@@ -1,0 +1,35 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: #090d12;
+  color: #e9f1f8;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: radial-gradient(circle at top, #172637, #090d12 52%); min-height: 100vh; }
+main { width: min(1420px, 96vw); margin: 0 auto; padding: 2rem 0 3rem; }
+header, .auth-panel, .row { display: flex; align-items: center; gap: 0.8rem; }
+header { justify-content: space-between; margin-bottom: 1.2rem; }
+h1 { margin: 0; font: 600 clamp(1.8rem, 4vw, 3.2rem)/1 sans-serif; letter-spacing: -0.04em; }
+.eyebrow { color: #64dfb1; letter-spacing: 0.22em; margin: 0 0 0.5rem; font-size: 0.72rem; }
+.state { border: 1px solid #40505e; border-radius: 999px; padding: 0.5rem 0.8rem; }
+.state.online { color: #64dfb1; border-color: #32795f; }
+.state.offline { color: #ff8e8e; border-color: #753e46; }
+.auth-panel, aside, .screen-wrap { border: 1px solid #263746; background: rgba(10,16,23,.9); border-radius: 12px; padding: 1rem; }
+.auth-panel { margin-bottom: 1rem; flex-wrap: wrap; }
+input, textarea, button { font: inherit; }
+input, textarea { color: #e9f1f8; background: #0b1219; border: 1px solid #314353; border-radius: 6px; padding: .65rem; }
+#token { flex: 1 1 320px; }
+button { border: 1px solid #44735f; background: #18392f; color: #dcfff1; border-radius: 6px; padding: .65rem .8rem; cursor: pointer; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.danger { border-color: #8a4048; background: #461f25; color: #ffd9dd; }
+.console-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(290px, 1fr); gap: 1rem; }
+.screen-wrap { min-height: 420px; display: flex; flex-direction: column; justify-content: center; }
+#screen { display: block; width: 100%; min-height: 320px; object-fit: contain; background: #020405; border-radius: 6px; }
+.hint { color: #91a3b2; font-size: .78rem; margin: .7rem 0 0; }
+aside { display: flex; flex-direction: column; gap: .8rem; }
+.toggle { padding: .7rem; border: 1px solid #304252; border-radius: 6px; }
+textarea { resize: vertical; width: 100%; }
+.row { flex-wrap: wrap; }
+.row input { width: 5rem; }
+pre { white-space: pre-wrap; color: #9fc8e9; background: #070b0f; border-radius: 6px; padding: .8rem; min-height: 10rem; overflow-wrap: anywhere; }
+@media (max-width: 850px) { .console-grid { grid-template-columns: 1fr; } }

@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+TITLE='N.O.O.B Local Console'
+DISPLAY="${DISPLAY:-:0}"
+XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}"
+export DISPLAY XAUTHORITY
+
+if ! command -v xdotool >/dev/null 2>&1; then
+    exit 2
+fi
+
+window="$(xdotool search --name "^${TITLE}$" 2>/dev/null | tail -n 1 || true)"
+if [ -n "$window" ]; then
+    active="$(xdotool getactivewindow 2>/dev/null || true)"
+    if [ "$active" = "$window" ]; then
+        # Ask the application to close through WM_DELETE_WINDOW.  The viewer
+        # confirms local disarm before it exits and refuses to disappear when
+        # release cannot be proven.
+        xdotool windowclose "$window"
+    else
+        xdotool windowactivate --sync "$window"
+        xdotool windowraise "$window"
+    fi
+    exit 0
+fi
+
+APP="${NOOB_LOCAL_CONSOLE_APP:-/opt/noob/appliance/noob_local_console.py}"
+if [ ! -r "$APP" ]; then
+    exit 3
+fi
+
+nohup /usr/bin/python3 "$APP" >/dev/null 2>&1 &
+
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    window="$(xdotool search --name "^${TITLE}$" 2>/dev/null | tail -n 1 || true)"
+    if [ -n "$window" ]; then
+        xdotool windowactivate --sync "$window"
+        xdotool windowraise "$window"
+        exit 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+
+exit 4

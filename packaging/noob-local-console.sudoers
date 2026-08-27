@@ -1,0 +1,5 @@
+# Replace __NOOB_DESKTOP_USER__ during installation.
+# The local viewer receives only the gateway token bytes on stdout. It cannot
+# run an arbitrary command as the service account through this rule.
+Cmnd_Alias NOOB_READ_LOCAL_TOKEN = /bin/cat /etc/noob/local-console.key
+__NOOB_DESKTOP_USER__ ALL=(noob) NOPASSWD: NOOB_READ_LOCAL_TOKEN

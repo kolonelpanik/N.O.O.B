@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=N.O.O.B Local Console
+Comment=View a target and switch the uConsole controls between desktop and target
+Exec=/opt/noob/appliance/noob-local-console-toggle
+Icon=video-display
+Terminal=false
+StartupNotify=true
+StartupWMClass=NoobLocalConsole
+Categories=System;RemoteAccess;

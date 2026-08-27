@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noob-gateway"
+version = "0.1.0"
+description = "Never Out Of Bounds hardware-in-the-loop video and HID gateway"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.10,<4",
+  "pyserial>=3.5,<4",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8,<10",
+  "pytest-asyncio>=0.24,<2",
+]
+
+[project.scripts]
+noob-gateway = "noob_gateway.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "gateway"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["gateway"]
+
+[tool.setuptools.package-data]
+noob_gateway = ["static/*.html", "static/*.js", "static/*.css"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>N.O.O.B. Console</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">NEVER OUT OF BOUNDS</p>
+        <h1>Hardware console</h1>
+      </div>
+      <div id="state" class="state offline">Disconnected</div>
+    </header>
+
+    <section class="auth-panel">
+      <label for="token">Bearer token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false">
+      <button id="connect">Connect and claim control</button>
+      <button id="release" class="danger">Release all input</button>
+    </section>
+
+    <section class="console-grid">
+      <div class="screen-wrap">
+        <img id="screen" alt="Latest target display frame">
+        <p class="hint">Enable input capture, then click the video for relative mouse control. Escape releases pointer lock.</p>
+      </div>
+      <aside>
+        <label class="toggle"><input id="capture" type="checkbox" disabled> Capture keyboard and mouse</label>
+        <label for="typeText">Safe text submit</label>
+        <textarea id="typeText" rows="7" maxlength="512" spellcheck="false"></textarea>
+        <div class="row">
+          <label for="interval">Delay ms</label>
+          <input id="interval" type="number" min="0" max="25" value="5">
+          <button id="typeButton" disabled>Type text</button>
+        </div>
+        <pre id="status">No authenticated status yet.</pre>
+      </aside>
+    </section>
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

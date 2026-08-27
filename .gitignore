@@ -1,0 +1,39 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node / Electron
+operator/node_modules/
+operator/dist/
+operator/dist-electron/
+operator/release/
+*.log
+
+# Local secrets and runtime state
+.env
+.env.*
+!.env.example
+auth.key
+local-console.key
+*.key
+*.token
+*.pem
+*.p12
+*.pfx
+.npmrc
+.pypirc
+.netrc
+*.pid
+*.sock
+
+# macOS / editor state
+.DS_Store
+*.swp
+*~
+
+# Captured acceptance artifacts are opt-in, not committed by default
+artifacts/
