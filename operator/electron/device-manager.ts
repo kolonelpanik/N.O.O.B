@@ -491,6 +491,21 @@ export function sshArguments(
   knownHostsFile: string,
   localPort: number,
 ): string[] {
+  const hasControlCharacter = [...knownHostsFile].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+  if (!path.isAbsolute(knownHostsFile) || hasControlCharacter) {
+    throw new Error("invalid_known_hosts_path");
+  }
+  // `ssh -o` reparses each option with OpenSSH config syntax even when spawn
+  // receives an argv array. Quote the value inside that option so the normal
+  // macOS Application Support path remains one filename, and escape `%` so a
+  // literal path segment cannot be interpreted as an OpenSSH token.
+  const quotedKnownHostsFile = `"${knownHostsFile
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("%", "%%")}"`;
   return [
     "-N",
     "-T",
@@ -501,7 +516,7 @@ export function sshArguments(
     "-o", "IdentitiesOnly=yes",
     "-o", "IdentityAgent=none",
     "-o", "StrictHostKeyChecking=yes",
-    "-o", `UserKnownHostsFile=${knownHostsFile}`,
+    "-o", `UserKnownHostsFile=${quotedKnownHostsFile}`,
     "-o", "ExitOnForwardFailure=yes",
     "-o", "ConnectTimeout=5",
     "-o", "ServerAliveInterval=15",

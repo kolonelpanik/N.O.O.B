@@ -129,7 +129,8 @@ describe("Mac operator device policy", () => {
       capabilities: ["target-video", "hid"],
       createdAt: "2026-08-27T12:00:00.000Z",
     };
-    const args = sshArguments(profile, "/Users/test/.ssh/id_noob", "/Users/test/known_hosts", 23456);
+    const knownHosts = "/Users/test/Library/Application Support/N.O.O.B/known_hosts";
+    const args = sshArguments(profile, "/Users/test/.ssh/id_noob", knownHosts, 23456);
     const joined = args.join(" ");
 
     expect(args.at(-1)).toBe("kali@192.168.50.83");
@@ -138,8 +139,21 @@ describe("Mac operator device policy", () => {
     expect(joined).toContain("IdentitiesOnly=yes");
     expect(joined).toContain("IdentityAgent=none");
     expect(joined).toContain("StrictHostKeyChecking=yes");
+    expect(args).toContain(`UserKnownHostsFile="${knownHosts}"`);
+    expect(args).not.toContain(`UserKnownHostsFile=${knownHosts}`);
     expect(joined).toContain("ExitOnForwardFailure=yes");
     expect(joined).not.toMatch(/token|password|bearer/i);
+  });
+
+  it("fails closed on an OpenSSH config control character in the pinned file path", () => {
+    expect(() => sshArguments(profile(9), "/Users/test/.ssh/id_noob", "/tmp/pins\nother", 23456))
+      .toThrow("invalid_known_hosts_path");
+  });
+
+  it("escapes literal OpenSSH tokens, quotes, and backslashes in the pinned file path", () => {
+    const knownHosts = '/tmp/N.O.O.B %h/"operator"\\known_hosts';
+    expect(sshArguments(profile(10), "/Users/test/.ssh/id_noob", knownHosts, 23456))
+      .toContain('UserKnownHostsFile="/tmp/N.O.O.B %%h/\\"operator\\"\\\\known_hosts"');
   });
 
   it("creates only owner-private non-secret pairing metadata before any connection", async () => {

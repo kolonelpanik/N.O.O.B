@@ -274,7 +274,7 @@ MacBook target:
 | Local controls | uConsole keyboard and trackball forwarded through the shared lease; native left, right, and middle mapping retained |
 | Desktop operator | Live Electron view, authenticated ownership, safe release, and automatic stream recovery after a gateway restart |
 | Agent path | Bounded API opened Chrome, created a tab, navigated to YouTube, and was verified through a fresh capture frame |
-| Automated checks | 193 Python gateway/Pico/camera tests (plus 60 subtests), 120 Electron tests across 23 files, and 51 agent-plugin tests across 9 files passing; Electron lint/build, plugin typecheck/build, lock checks, and both npm dependency audits clean |
+| Automated checks | 193 Python gateway/Pico/camera tests (plus 60 subtests), 122 Electron tests across 23 files, and 54 agent-plugin tests across 10 files passing; Electron lint/build, plugin typecheck/build, lock checks, and both npm dependency audits clean |
 
 This is a working prototype, not a certification claim. The full reboot and
 failure-injection matrix in [Acceptance](docs/acceptance.md) remains the bar for

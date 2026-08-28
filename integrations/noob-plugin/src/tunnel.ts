@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { stat } from "node:fs/promises";
 import net from "node:net";
+import path from "node:path";
 import { addKnownHost, loadStore, readProtectedText, runtimePaths } from "./config.js";
 import { GatewayApi } from "./gateway.js";
 import { assertDeviceId } from "./policy.js";
@@ -37,6 +38,45 @@ async function freeLoopbackPort(): Promise<number> {
 
 function connectionId(): string {
   return `conn_${randomBytes(18).toString("base64url")}`;
+}
+
+export function sshArguments(
+  profile: DeviceProfile,
+  identityFile: string,
+  knownHostsFile: string,
+  localPort: number,
+): string[] {
+  const hasControlCharacter = [...knownHostsFile].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+  if (!path.isAbsolute(knownHostsFile) || hasControlCharacter) {
+    throw new Error("invalid_known_hosts_path");
+  }
+  // OpenSSH parses the value of `-o` with config-file quoting rules after it
+  // receives argv. Preserve space-bearing macOS support paths as one filename
+  // and prevent literal `%` characters from becoming OpenSSH token expansions.
+  const quotedKnownHostsFile = `"${knownHostsFile
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("%", "%%")}"`;
+  return [
+    "-N",
+    "-T",
+    "-p", String(profile.ssh_port),
+    "-i", identityFile,
+    "-L", `127.0.0.1:${localPort}:127.0.0.1:${profile.gateway_port}`,
+    "-o", "BatchMode=yes",
+    "-o", "IdentitiesOnly=yes",
+    "-o", "IdentityAgent=none",
+    "-o", "StrictHostKeyChecking=yes",
+    "-o", `UserKnownHostsFile=${quotedKnownHostsFile}`,
+    "-o", "ExitOnForwardFailure=yes",
+    "-o", "ConnectTimeout=5",
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=2",
+    `${profile.ssh_user}@${profile.address}`,
+  ];
 }
 
 async function waitForGateway(api: GatewayApi, child: ChildProcess): Promise<void> {
@@ -87,23 +127,7 @@ export class TunnelManager {
     const bearer = await readProtectedText(paths.gateway_token_file, 32, 256);
     if (!TOKEN_PATTERN.test(bearer)) throw new Error("gateway_token_invalid");
     const localPort = await freeLoopbackPort();
-    const args = [
-      "-N",
-      "-T",
-      "-p", String(profile.ssh_port),
-      "-i", paths.identity_file,
-      "-L", `127.0.0.1:${localPort}:127.0.0.1:${profile.gateway_port}`,
-      "-o", "BatchMode=yes",
-      "-o", "IdentitiesOnly=yes",
-      "-o", "IdentityAgent=none",
-      "-o", "StrictHostKeyChecking=yes",
-      "-o", `UserKnownHostsFile=${paths.known_hosts_file}`,
-      "-o", "ExitOnForwardFailure=yes",
-      "-o", "ConnectTimeout=5",
-      "-o", "ServerAliveInterval=15",
-      "-o", "ServerAliveCountMax=2",
-      `${profile.ssh_user}@${profile.address}`,
-    ];
+    const args = sshArguments(profile, paths.identity_file, paths.known_hosts_file, localPort);
     const child = spawn("ssh", args, {
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
