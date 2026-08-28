@@ -1,0 +1,170 @@
+{
+  "name": "N.O.O.B. Environmental Camera API",
+  "api_version": 1,
+  "api_base": "/api/v1",
+  "authentication": {
+    "scheme": "bearer",
+    "header": "Authorization",
+    "query_credentials_forbidden": true,
+    "unauthenticated_paths": [
+      "/.well-known/noob-camera"
+    ]
+  },
+  "identifiers": {
+    "device_id_pattern": "^cam_[0-9a-f]{16}$",
+    "boot_id_pattern": "^b_[0-9a-f]{16}$",
+    "media_id_pattern": "^m_[0-9a-f]{32}$",
+    "job_id_pattern": "^j_[0-9a-f]{32}$",
+    "identifiers_are_paths": false
+  },
+  "limits": {
+    "request_body_bytes": 256,
+    "jpeg_bytes": 262144,
+    "media_page_size": 50,
+    "fresh_frame_age_ms": 2000,
+    "upstream_streams": 1,
+    "clip_duration_ms": {
+      "minimum": 1000,
+      "maximum": 30000
+    },
+    "clip_fps": {
+      "minimum": 1,
+      "maximum": 5
+    },
+    "clip_frames_maximum": 150
+  },
+  "camera_state": {
+    "configured_pinmap": "ai_thinker_candidate",
+    "required_sensor_pid": 38,
+    "required_sensor_name": "OV2640",
+    "baseline_pixel_format": "jpeg",
+    "baseline_width": 640,
+    "baseline_height": 480,
+    "generation_checked": true,
+    "disabled_capture_status": 409
+  },
+  "storage": {
+    "bus": "sdmmc",
+    "width_bits": 1,
+    "autoformat": false,
+    "completed_media_root": "/NOOB/media",
+    "temporary_name_prefix": ".partial-",
+    "commit_operation": "rename",
+    "clip_representation": "jpeg_sequence_with_manifest"
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/.well-known/noob-camera",
+      "authenticated": false,
+      "success_status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/health",
+      "authenticated": true,
+      "success_status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/status",
+      "authenticated": true,
+      "success_status": 200
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/camera/state",
+      "authenticated": true,
+      "request_fields": ["enabled", "expected_generation"],
+      "success_status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/camera/snapshot.jpg",
+      "authenticated": true,
+      "success_status": 200,
+      "content_type": "image/jpeg"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/camera/stream.mjpg",
+      "authenticated": true,
+      "success_status": 200,
+      "content_type": "multipart/x-mixed-replace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/storage",
+      "authenticated": true,
+      "success_status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/storage/snapshots",
+      "authenticated": true,
+      "request_fields": ["expected_generation"],
+      "success_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/storage/clips",
+      "authenticated": true,
+      "request_fields": ["duration_ms", "fps", "expected_generation"],
+      "success_status": 202
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/jobs/{job_id}",
+      "authenticated": true,
+      "success_status": 200,
+      "job_states": ["queued", "running", "cancelling", "complete", "failed", "cancelled"]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/jobs/{job_id}",
+      "authenticated": true,
+      "success_status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/media",
+      "authenticated": true,
+      "query_fields": ["cursor", "limit"],
+      "success_status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/media/{media_id}",
+      "authenticated": true,
+      "success_status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/media/{media_id}/content",
+      "authenticated": true,
+      "success_status": 200,
+      "content_type": "image/jpeg"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/media/{media_id}/frames/{index}.jpg",
+      "authenticated": true,
+      "success_status": 200,
+      "content_type": "image/jpeg"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/media/{media_id}",
+      "authenticated": true,
+      "success_status": 200
+    }
+  ],
+  "response_fields": {
+    "health": ["api", "status", "device_id", "boot_id", "uptime_ms", "components"],
+    "status": ["api", "device_id", "boot_id", "uptime_ms", "firmware", "provisioning", "wifi", "camera", "storage", "reset_reason", "heap"],
+    "storage": ["state", "mounted", "writable", "total_bytes", "free_bytes", "reserve_bytes", "media_count", "active_job_id", "limits", "last_error"],
+    "media_item": ["id", "kind", "state", "created_at", "created_uptime_ms", "size_bytes", "width", "height", "frame_count", "fps", "duration_ms", "content_type"],
+    "job": ["job_id", "kind", "state", "created_uptime_ms", "frames_written", "frames_target", "media_id", "error_code"],
+    "error": ["error.code", "error.message"]
+  }
+}

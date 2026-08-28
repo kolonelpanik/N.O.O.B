@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "noob": {
+      "command": "node",
+      "args": ["./dist/main.js", "--stdio"],
+      "cwd": "."
+    }
+  }
+}

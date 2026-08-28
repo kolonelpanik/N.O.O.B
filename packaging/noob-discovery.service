@@ -1,0 +1,43 @@
+[Unit]
+Description=N.O.O.B. SSH pairing discovery advertisement
+Documentation=file:/opt/noob-discovery/docs/appliance-discovery.md
+After=network-online.target avahi-daemon.service ssh.service sshd.service
+Wants=network-online.target
+Requires=avahi-daemon.service
+StartLimitIntervalSec=60
+StartLimitBurst=12
+
+[Service]
+Type=simple
+User=noob
+Group=noob
+EnvironmentFile=/etc/default/noob-discovery
+ExecStartPre=/usr/bin/python3 /opt/noob-discovery/appliance/noob_discovery_preflight.py
+ExecStart=/usr/bin/avahi-publish-service "N.O.O.B. on %H" _noob-kvm._tcp ${NOOB_DISCOVERY_SSH_PORT} api=1 product=N.O.O.B. version=0.2.0 capabilities=target-video,target-hid,ssh-forward
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+KillMode=mixed
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

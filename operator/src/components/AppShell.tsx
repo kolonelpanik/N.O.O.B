@@ -1,4 +1,4 @@
-import { PanelRight, Settings } from "lucide-react";
+import { Laptop, PanelRight, Settings } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { ConnectionStatus } from "./ConnectionStatus";
 import type { ProofTone } from "../state/proof";
@@ -15,6 +15,7 @@ interface AppShellProps {
   workspace: ReactNode;
   controlRail: ReactNode;
   proofRail: ReactNode;
+  onDevices(): void;
   onSettings(): void;
 }
 
@@ -24,6 +25,7 @@ export function AppShell({
   workspace,
   controlRail,
   proofRail,
+  onDevices,
   onSettings,
 }: AppShellProps) {
   const [railOpen, setRailOpen] = useState(false);
@@ -39,6 +41,10 @@ export function AppShell({
         <div className="header-signals">
           {signals.map((signal) => <ConnectionStatus key={signal.label} {...signal} />)}
         </div>
+        <button className="device-button" type="button" aria-label="Choose N.O.O.B. device" onClick={onDevices}>
+          <Laptop size={17} strokeWidth={1.7} />
+          <span>Devices</span>
+        </button>
         <button
           className="icon-button rail-toggle"
           type="button"
@@ -69,7 +75,7 @@ export function AppShell({
       </main>
 
       {proofRail}
-      <footer className="app-footer">Loopback only · SSH tunnel · No recording</footer>
+      <footer className="app-footer">Loopback only · SSH tunnel · No automatic recording</footer>
     </div>
   );
 }

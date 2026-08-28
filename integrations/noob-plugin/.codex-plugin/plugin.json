@@ -1,0 +1,24 @@
+{
+  "name": "noob-plugin",
+  "version": "0.2.0",
+  "description": "Observe and safely operate a paired N.O.O.B. hardware KVM appliance.",
+  "author": {
+    "name": "N.O.O.B. Project"
+  },
+  "keywords": ["kvm", "hardware", "remote-operator", "mcp-apps"],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "N.O.O.B. Operator",
+    "shortDescription": "Observe and safely control a paired hardware KVM.",
+    "longDescription": "A local-first operator and agent interface for N.O.O.B. appliances, with pinned SSH transport, live frames, explicit camera storage, and bounded HID control.",
+    "developerName": "N.O.O.B. Project",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Show the current N.O.O.B. device status.",
+      "Open the N.O.O.B. operator console.",
+      "Get a fresh target frame and explain what is visible."
+    ],
+    "brandColor": "#58E6E0"
+  }
+}

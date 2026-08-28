@@ -1,0 +1,24 @@
+{
+  "manifest_version": "0.3",
+  "name": "noob-operator",
+  "display_name": "N.O.O.B. Operator",
+  "version": "0.2.0",
+  "description": "Local-first observation and bounded control for a paired N.O.O.B. hardware KVM appliance.",
+  "author": {
+    "name": "N.O.O.B. Project"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/main.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/main.js", "--stdio"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "linux"],
+    "runtimes": {
+      "node": ">=22"
+    }
+  }
+}

@@ -13,6 +13,13 @@ from aiohttp import web
 from .auth import bearer_middleware, load_token
 from .config import GatewayConfig
 from .control_lease import ControlLease, LeaseBusy, LeaseInvalid, LeaseReleaseRequired
+from .environment_camera import (
+    EnvironmentCamera,
+    EnvironmentCameraError,
+    valid_cursor,
+    valid_job_id,
+    valid_media_id,
+)
 from .local_input import (
     LocalInputDisabled,
     LocalInputManager,
@@ -118,6 +125,113 @@ def _video_mode_request(obj: dict[str, Any]) -> tuple[str, int]:
     return mode_id, generation
 
 
+def _generation(value: Any) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= 2_147_483_647
+    ):
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_range"}',
+            content_type="application/json",
+        )
+    return value
+
+
+def _environment_state_request(obj: dict[str, Any]) -> tuple[bool, int]:
+    if set(obj) != {"enabled", "expected_generation"}:
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_field"}',
+            content_type="application/json",
+        )
+    enabled = obj["enabled"]
+    if not isinstance(enabled, bool):
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_field"}',
+            content_type="application/json",
+        )
+    return enabled, _generation(obj["expected_generation"])
+
+
+def _environment_snapshot_request(obj: dict[str, Any]) -> int:
+    if set(obj) != {"expected_generation"}:
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_field"}',
+            content_type="application/json",
+        )
+    return _generation(obj["expected_generation"])
+
+
+def _environment_clip_request(obj: dict[str, Any]) -> tuple[int, int, int]:
+    if set(obj) != {"duration_seconds", "fps", "expected_generation"}:
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_field"}',
+            content_type="application/json",
+        )
+    duration = obj["duration_seconds"]
+    fps = obj["fps"]
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, int)
+        or isinstance(fps, bool)
+        or not isinstance(fps, int)
+    ):
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_range"}',
+            content_type="application/json",
+        )
+    return duration, fps, _generation(obj["expected_generation"])
+
+
+def _require_no_query(request: web.Request) -> None:
+    if request.query_string:
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_query"}',
+            content_type="application/json",
+        )
+
+
+def _environment_media_query(request: web.Request, maximum: int) -> tuple[str | None, int]:
+    pairs = list(request.query.items())
+    if len(pairs) != len(request.query) or any(
+        key not in {"cursor", "limit"} for key, _value in pairs
+    ):
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_query"}',
+            content_type="application/json",
+        )
+    # MultiDict.items() omits duplicate values, so inspect every accepted key.
+    for key in ("cursor", "limit"):
+        if len(request.query.getall(key, [])) > 1:
+            raise web.HTTPBadRequest(
+                text='{"ok":false,"error":"bad_query"}',
+                content_type="application/json",
+            )
+    cursor = request.query.get("cursor")
+    if cursor is not None and not valid_cursor(cursor):
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_cursor"}',
+            content_type="application/json",
+        )
+    raw_limit = request.query.get("limit", "20")
+    if not raw_limit.isascii() or not raw_limit.isdecimal() or raw_limit.startswith("0"):
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_range"}',
+            content_type="application/json",
+        )
+    limit = int(raw_limit)
+    if not 1 <= limit <= maximum:
+        raise web.HTTPBadRequest(
+            text='{"ok":false,"error":"bad_range"}',
+            content_type="application/json",
+        )
+    return cursor, limit
+
+
+def _camera_error(exc: EnvironmentCameraError) -> web.Response:
+    return web.json_response({"ok": False, "error": exc.code}, status=exc.status)
+
+
 def _lease_header(request: web.Request) -> str:
     values = request.headers.getall("X-NOOB-Lease", [])
     if len(values) != 1:
@@ -160,11 +274,13 @@ class GatewayRuntime:
         config: GatewayConfig,
         serial_link: Any,
         video: Any,
+        environment_camera: Any,
         local_input: Any | None = None,
     ) -> None:
         self.config = config
         self.serial = serial_link
         self.video = video
+        self.environment_camera = environment_camera
         self.lease = ControlLease(config.limits.lease_ttl_seconds)
         self.rate_limiter = TokenBucket(
             config.limits.input_rate_per_second, config.limits.input_burst
@@ -183,6 +299,7 @@ class GatewayRuntime:
     async def start(self) -> None:
         await self.serial.start()
         await self.video.start()
+        await self.environment_camera.start()
         await self.local_input.start()
         self._lease_task = asyncio.create_task(self._lease_watchdog(), name="noob-control-lease")
 
@@ -196,6 +313,7 @@ class GatewayRuntime:
         await self.lease.force_clear()
         await self.serial.stop()
         await self.video.stop()
+        await self.environment_camera.stop()
 
     async def _lease_watchdog(self) -> None:
         try:
@@ -394,6 +512,7 @@ async def _status(request: web.Request) -> web.Response:
             "ok": True,
             "serial": runtime.serial.status,
             "video": runtime.video.status,
+            "environment_camera": runtime.environment_camera.status,
             "local_input": runtime.local_input.status,
             "control": {
                 "active": lease.active,
@@ -677,6 +796,243 @@ async def _stream(request: web.Request) -> web.StreamResponse:
     return response
 
 
+async def _environment_status(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    return web.json_response(
+        {
+            "ok": True,
+            "environment_camera": _runtime(request).environment_camera.status,
+        }
+    )
+
+
+async def _environment_state(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    runtime = _runtime(request)
+    enabled, generation = _environment_state_request(
+        await _strict_json(request, runtime.config.limits.max_body_bytes)
+    )
+    try:
+        status = await runtime.environment_camera.set_enabled(enabled, generation)
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.json_response({"ok": True, "environment_camera": status})
+
+
+async def _environment_frame(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    try:
+        frame = await _runtime(request).environment_camera.get_frame()
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.Response(
+        body=frame.data,
+        content_type="image/jpeg",
+        headers={
+            "X-NOOB-Frame-Sequence": str(frame.sequence),
+            "X-NOOB-Environment-Generation": str(frame.generation),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+async def _environment_stream(request: web.Request) -> web.StreamResponse:
+    _require_no_query(request)
+    camera = _runtime(request).environment_camera
+    acquired = False
+    try:
+        await camera.acquire_viewer()
+        acquired = True
+        initial = await camera.get_frame()
+    except EnvironmentCameraError as exc:
+        if acquired:
+            await camera.release_viewer()
+        return _camera_error(exc)
+    response = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "multipart/x-mixed-replace; boundary=noobenv",
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+        },
+    )
+    try:
+        await response.prepare(request)
+        sequence = initial.sequence - 1
+        while True:
+            frame = await camera.wait_for_frame(sequence, timeout=5.0)
+            if frame is None:
+                if not camera.status.get("stream_enabled", False):
+                    break
+                continue
+            sequence = frame.sequence
+            part = (
+                b"--noobenv\r\nContent-Type: image/jpeg\r\n"
+                b"X-NOOB-Environment-Generation: "
+                + str(frame.generation).encode("ascii")
+                + b"\r\nContent-Length: "
+                + str(len(frame.data)).encode("ascii")
+                + b"\r\n\r\n"
+                + frame.data
+                + b"\r\n"
+            )
+            await response.write(part)
+    except asyncio.CancelledError:
+        raise
+    except (ConnectionResetError, BrokenPipeError):
+        pass
+    finally:
+        await camera.release_viewer()
+    return response
+
+
+async def _environment_storage(request: web.Request) -> web.Response:
+    runtime = _runtime(request)
+    cursor, limit = _environment_media_query(
+        request, runtime.config.environment_camera.max_page_size
+    )
+    try:
+        storage = await runtime.environment_camera.storage_status()
+        page = await runtime.environment_camera.list_media(
+            cursor=cursor, limit=limit
+        )
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.json_response(
+        {
+            "ok": True,
+            "storage": storage,
+            "items": page["items"],
+            "next_cursor": page["next_cursor"],
+        }
+    )
+
+
+async def _environment_storage_item(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    media_id = request.match_info["media_id"]
+    if not valid_media_id(media_id):
+        return web.json_response({"ok": False, "error": "bad_media_id"}, status=400)
+    try:
+        item = await _runtime(request).environment_camera.get_media(media_id)
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.json_response({"ok": True, "item": item})
+
+
+async def _environment_storage_content(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    media_id = request.match_info["media_id"]
+    if not valid_media_id(media_id):
+        return web.json_response({"ok": False, "error": "bad_media_id"}, status=400)
+    try:
+        data = await _runtime(request).environment_camera.get_snapshot_content(
+            media_id
+        )
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.Response(
+        body=data,
+        content_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="noob-{media_id}.jpg"',
+        },
+    )
+
+
+async def _environment_clip_frame(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    media_id = request.match_info["media_id"]
+    if not valid_media_id(media_id):
+        return web.json_response({"ok": False, "error": "bad_media_id"}, status=400)
+    raw_index = request.match_info["frame_index"]
+    if not raw_index.isascii() or not raw_index.isdecimal():
+        return web.json_response({"ok": False, "error": "bad_range"}, status=400)
+    frame_index = int(raw_index)
+    try:
+        data = await _runtime(request).environment_camera.get_clip_frame(
+            media_id, frame_index
+        )
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.Response(
+        body=data,
+        content_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": (
+                f'inline; filename="noob-{media_id}-frame-{frame_index}.jpg"'
+            ),
+        },
+    )
+
+
+async def _environment_snapshot(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    runtime = _runtime(request)
+    expected_generation = _environment_snapshot_request(
+        await _strict_json(request, runtime.config.limits.max_body_bytes)
+    )
+    try:
+        item = await runtime.environment_camera.create_snapshot(expected_generation)
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.json_response({"ok": True, "item": item}, status=201)
+
+
+async def _environment_clip(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    runtime = _runtime(request)
+    duration_seconds, fps, expected_generation = _environment_clip_request(
+        await _strict_json(request, runtime.config.limits.max_body_bytes)
+    )
+    camera_config = runtime.config.environment_camera
+    if (
+        not 1 <= duration_seconds <= camera_config.max_clip_seconds
+        or not 1 <= fps <= camera_config.max_clip_fps
+        or duration_seconds * fps > 150
+    ):
+        return web.json_response({"ok": False, "error": "bad_range"}, status=400)
+    try:
+        job = await runtime.environment_camera.create_clip(
+            duration_seconds=duration_seconds,
+            fps=fps,
+            expected_generation=expected_generation,
+        )
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.json_response({"ok": True, **job}, status=202)
+
+
+async def _environment_job(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    job_id = request.match_info["job_id"]
+    if not valid_job_id(job_id):
+        return web.json_response({"ok": False, "error": "bad_job_id"}, status=400)
+    try:
+        job = await _runtime(request).environment_camera.get_job(job_id)
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.json_response({"ok": True, "job": job})
+
+
+async def _environment_job_stop(request: web.Request) -> web.Response:
+    _require_no_query(request)
+    runtime = _runtime(request)
+    _require_empty_object(
+        await _strict_json(request, runtime.config.limits.max_body_bytes)
+    )
+    job_id = request.match_info["job_id"]
+    if not valid_job_id(job_id):
+        return web.json_response({"ok": False, "error": "bad_job_id"}, status=400)
+    try:
+        job = await runtime.environment_camera.stop_job(job_id)
+    except EnvironmentCameraError as exc:
+        return _camera_error(exc)
+    return web.json_response({"ok": True, **job})
+
+
 async def _startup(app: web.Application) -> None:
     await app[RUNTIME_KEY].start()
 
@@ -692,6 +1048,7 @@ def create_app(
     local_console_token: str | None = None,
     serial_link: Any | None = None,
     video: Any | None = None,
+    environment_camera: Any | None = None,
     local_input: Any | None = None,
 ) -> web.Application:
     """Build an app; injected serial/video objects are intended for deterministic tests."""
@@ -704,6 +1061,18 @@ def create_app(
         config,
         serial_link if serial_link is not None else SerialLink(config.serial),
         video if video is not None else V4L2Capture(config.video),
+        (
+            environment_camera
+            if environment_camera is not None
+            else EnvironmentCamera(
+                config.environment_camera,
+                forbidden_tokens=tuple(
+                    credential
+                    for credential in (expected_token, expected_local_token)
+                    if credential is not None
+                ),
+            )
+        ),
         local_input,
     )
     app = web.Application(
@@ -733,4 +1102,35 @@ def create_app(
     app.router.add_post("/api/v1/video/mode", _video_mode)
     app.router.add_get("/api/v1/frame.jpg", _frame)
     app.router.add_get("/api/v1/stream.mjpeg", _stream)
+    app.router.add_get("/api/v1/environment-camera/status", _environment_status)
+    app.router.add_post("/api/v1/environment-camera/state", _environment_state)
+    app.router.add_get("/api/v1/environment-camera/frame.jpg", _environment_frame)
+    app.router.add_get(
+        "/api/v1/environment-camera/stream.mjpeg", _environment_stream
+    )
+    app.router.add_get("/api/v1/environment-camera/storage", _environment_storage)
+    app.router.add_post(
+        "/api/v1/environment-camera/snapshot", _environment_snapshot
+    )
+    app.router.add_post("/api/v1/environment-camera/clip", _environment_clip)
+    app.router.add_get(
+        r"/api/v1/environment-camera/jobs/{job_id:j_[0-9a-f]{32}}",
+        _environment_job,
+    )
+    app.router.add_post(
+        r"/api/v1/environment-camera/jobs/{job_id:j_[0-9a-f]{32}}/stop",
+        _environment_job_stop,
+    )
+    app.router.add_get(
+        r"/api/v1/environment-camera/storage/{media_id:m_[0-9a-f]{32}}",
+        _environment_storage_item,
+    )
+    app.router.add_get(
+        r"/api/v1/environment-camera/storage/{media_id:m_[0-9a-f]{32}}/content",
+        _environment_storage_content,
+    )
+    app.router.add_get(
+        r"/api/v1/environment-camera/storage/{media_id:m_[0-9a-f]{32}}/frames/{frame_index:[0-9]{1,3}}.jpg",
+        _environment_clip_frame,
+    )
     return app

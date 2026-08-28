@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>N.O.O.B. Operator</title>
+    <script type="module" src="/widget/src/operator-console.ts"></script>
+  </head>
+  <body>
+    <main class="app" id="app">
+      <header class="header">
+        <div class="identity">
+          <span class="eyebrow">NEVER OUT OF BOUNDS</span>
+          <strong>N.O.O.B.</strong>
+        </div>
+        <div class="proof" id="proof">OBSERVE ONLY</div>
+      </header>
+
+      <nav class="tabs" aria-label="Video source">
+        <button class="tab tab--active" data-source="target" type="button">TARGET</button>
+        <button class="tab" data-source="environment" type="button">ENVIRONMENT</button>
+        <span class="spacer"></span>
+        <button id="zoom-out" class="utility" type="button" aria-label="Zoom out">−</button>
+        <button id="zoom-label" class="utility utility--wide" type="button">FIT</button>
+        <button id="zoom-in" class="utility" type="button" aria-label="Zoom in">+</button>
+        <button id="fullscreen" class="utility utility--wide" type="button">FULLSCREEN</button>
+      </nav>
+
+      <section class="stage" id="stage" aria-label="N.O.O.B. live view">
+        <img id="frame" alt="N.O.O.B. live video frame" draggable="false" />
+        <div id="empty" class="empty">CONNECT A PAIRED DEVICE TO BEGIN</div>
+        <div class="source-badge" id="source-badge">TARGET HDMI</div>
+      </section>
+
+      <section class="telemetry">
+        <div><span>GATEWAY</span><strong id="gateway-state">—</strong></div>
+        <div><span>FRAME</span><strong id="frame-state">—</strong></div>
+        <div><span>CAMERA</span><strong id="camera-state">OPTIONAL</strong></div>
+        <div><span>STORAGE</span><strong id="storage-state">—</strong></div>
+      </section>
+
+      <section class="actions">
+        <button id="refresh" type="button">REFRESH FRAME</button>
+        <button id="camera-toggle" type="button" disabled>CAMERA STREAM</button>
+        <button id="screenshot" type="button" disabled>SAVE SCREENSHOT</button>
+        <button id="release" class="danger" type="button">EMERGENCY RELEASE</button>
+      </section>
+
+      <footer>
+        <span id="message">No automatic recording · Target acceptance requires a newer visual frame</span>
+        <span id="device">NO DEVICE</span>
+      </footer>
+    </main>
+  </body>
+</html>

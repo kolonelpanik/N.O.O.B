@@ -2,10 +2,11 @@
 Type=Application
 Version=1.0
 Name=N.O.O.B Local Console
-Comment=View a target and switch the uConsole controls between desktop and target
+Comment=View target HDMI or the environment camera and control an authorized target
 Exec=/opt/noob/appliance/noob-local-console-toggle
-Icon=video-display
+Icon=noob
 Terminal=false
 StartupNotify=true
 StartupWMClass=NoobLocalConsole
-Categories=System;RemoteAccess;
+Categories=System;RemoteAccess;Utility;
+Keywords=KVM;crash cart;HDMI;HID;camera;out-of-band;

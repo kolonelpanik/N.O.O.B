@@ -15,6 +15,7 @@ export function useFrameFeed(
   streamUrl: string,
   streamGeneration: number,
   viewerCount: number | null,
+  source: "target" | "environment" = "target",
 ): FrameFeed {
   const [usingFrameFallback, setUsingFrameFallback] = useState(false);
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
@@ -55,7 +56,7 @@ export function useFrameFeed(
 
     const poll = async () => {
       try {
-        const frame = await noobApi.frame();
+        const frame = await noobApi.frame(source);
         if (cancelled) return;
         const bytes = new Uint8Array(frame.bytes.byteLength);
         bytes.set(frame.bytes);
@@ -76,7 +77,7 @@ export function useFrameFeed(
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [authenticated, usingFrameFallback]);
+  }, [authenticated, source, usingFrameFallback]);
 
   useEffect(
     () => () => {

@@ -1,5 +1,6 @@
 # Python
 .venv/
+/build/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -11,6 +12,7 @@ operator/node_modules/
 operator/dist/
 operator/dist-electron/
 operator/release/
+/device-manager.js
 *.log
 
 # Local secrets and runtime state

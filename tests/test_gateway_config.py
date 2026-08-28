@@ -170,6 +170,149 @@ validated = true
                 with self.assertRaisesRegex(ConfigError, "mode_id is invalid"):
                     self._load(text.replace(prefix, invalid))
 
+    def test_environment_camera_defaults_disabled_and_shipped_configs_are_safe(self):
+        self.assertFalse(self._load("").environment_camera.enabled)
+        for relative in ("config/noob.toml.example", "config/noob.uconsole.toml"):
+            with self.subTest(relative=relative):
+                camera = load_config(ROOT / relative).environment_camera
+                self.assertFalse(camera.enabled)
+                self.assertIsNone(camera.host)
+                self.assertIsNone(camera.token_file)
+                self.assertLessEqual(camera.max_clip_seconds * camera.max_clip_fps, 150)
+
+    def test_environment_camera_accepts_only_fixed_private_ip_and_distinct_token(self):
+        config = self._load(
+            """
+[environment_camera]
+enabled = true
+host = "192.168.50.84"
+expected_device_id = "cam_0123456789abcdef"
+port = 8080
+token_file = "/etc/noob/environment-camera.key"
+"""
+        )
+        self.assertTrue(config.environment_camera.enabled)
+        self.assertEqual(config.environment_camera.host, "192.168.50.84")
+        self.assertEqual(
+            config.environment_camera.expected_device_id,
+            "cam_0123456789abcdef",
+        )
+        self.assertEqual(config.environment_camera.port, 8080)
+
+        for host in (
+            "camera.local",
+            "http://192.168.50.84",
+            "127.0.0.1",
+            "169.254.1.2",
+            "8.8.8.8",
+            "224.0.0.1",
+            "2001:4860:4860::8888",
+        ):
+            with self.subTest(host=host):
+                with self.assertRaises(ConfigError):
+                    self._load(
+                        f"""
+[environment_camera]
+enabled = true
+host = "{host}"
+expected_device_id = "cam_0123456789abcdef"
+token_file = "/etc/noob/environment-camera.key"
+"""
+                    )
+
+    def test_enabled_environment_camera_requires_address_and_credential(self):
+        with self.assertRaisesRegex(ConfigError, "requires environment_camera.host"):
+            self._load(
+                """
+[environment_camera]
+enabled = true
+token_file = "/etc/noob/environment-camera.key"
+expected_device_id = "cam_0123456789abcdef"
+"""
+            )
+        with self.assertRaisesRegex(ConfigError, "requires environment_camera.token_file"):
+            self._load(
+                """
+[environment_camera]
+enabled = true
+host = "10.20.30.40"
+expected_device_id = "cam_0123456789abcdef"
+"""
+            )
+        with self.assertRaisesRegex(
+            ConfigError, "requires environment_camera.expected_device_id"
+        ):
+            self._load(
+                """
+[environment_camera]
+enabled = true
+host = "10.20.30.40"
+token_file = "/etc/noob/environment-camera.key"
+"""
+            )
+        with self.assertRaisesRegex(ConfigError, "distinct from gateway credentials"):
+            self._load(
+                """
+[environment_camera]
+enabled = true
+host = "172.16.1.20"
+expected_device_id = "cam_0123456789abcdef"
+token_file = "/etc/noob/auth.key"
+"""
+            )
+
+        for device_id in (
+            "cam_0123456789abcde",
+            "cam_0123456789abcdef0",
+            "cam_0123456789abcdeF",
+            "camera_0123456789abcdef",
+        ):
+            with self.subTest(device_id=device_id):
+                with self.assertRaisesRegex(ConfigError, "must match"):
+                    self._load(
+                        f"""
+[environment_camera]
+enabled = false
+expected_device_id = "{device_id}"
+"""
+                    )
+
+    def test_environment_camera_config_is_strict_and_bounded(self):
+        with self.assertRaisesRegex(ConfigError, "unknown environment_camera keys"):
+            self._load(
+                """
+[environment_camera]
+enabled = false
+upstream_url = "http://192.168.50.84/"
+"""
+            )
+        for field, value in (
+            ("max_clients", 9),
+            ("max_page_size", 51),
+            ("max_clip_seconds", 31),
+            ("max_clip_fps", 6),
+            ("max_metadata_bytes", 512),
+            ("max_media_bytes", 134217729),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ConfigError, "allowed range"):
+                    self._load(
+                        f"""
+[environment_camera]
+enabled = false
+{field} = {value}
+"""
+                    )
+        with self.assertRaisesRegex(ConfigError, "must cover max_frame_bytes"):
+            self._load(
+                """
+[environment_camera]
+enabled = false
+max_frame_bytes = 2097152
+max_media_bytes = 1048576
+"""
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

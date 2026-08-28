@@ -1,0 +1,58 @@
+menu "N.O.O.B. environmental camera"
+
+    config NOOB_CAMERA_FIRMWARE_VERSION
+        string "Firmware version exposed through the local API"
+        default "0.2.0"
+
+    config NOOB_CAMERA_PROVISIONING_POP
+        string "Unique per-device provisioning proof of possession"
+        default ""
+        help
+            Required at runtime. Configure through a local, untracked sdkconfig.
+            Minimum 8 characters. Never commit the generated sdkconfig.
+
+    config NOOB_CAMERA_PROVISIONING_AP_KEY
+        string "Unique WPA2 key for the provisioning SoftAP"
+        default ""
+        help
+            Required at runtime. Configure through a local, untracked sdkconfig.
+            Must be 8-63 characters.
+
+    config NOOB_CAMERA_API_TOKEN
+        string "Unique bearer token used only by the N.O.O.B. gateway"
+        default ""
+        help
+            Required at runtime. Configure through a local, untracked sdkconfig.
+            Use 32-96 high-entropy printable characters. The token is never
+            advertised through mDNS or the well-known document.
+
+    config NOOB_CAMERA_HTTP_PORT
+        int "Private local HTTP API port"
+        range 1 65535
+        default 80
+
+    config NOOB_CAMERA_BOOT_ENABLED
+        bool "Enable the sensor after the diagnostic boot probe succeeds"
+        default y
+
+    config NOOB_CAMERA_CAPTURE_FPS
+        int "VGA JPEG capture arbiter target FPS"
+        range 1 15
+        default 10
+
+    config NOOB_CAMERA_MAX_MEDIA_ITEMS
+        int "Maximum completed microSD media objects"
+        range 1 1000
+        default 500
+
+    config NOOB_CAMERA_MAX_MEDIA_MIB
+        int "Maximum bytes retained under /NOOB/media, in MiB"
+        range 64 8192
+        default 2048
+
+    config NOOB_CAMERA_MIN_FREE_MIB
+        int "Minimum free-space reserve before/after retention, in MiB"
+        range 16 1024
+        default 64
+
+endmenu

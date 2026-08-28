@@ -91,7 +91,49 @@ visible frame or target Accessibility readback is the separate acceptance proof.
 
 - `ss -lntp` must show the HTTP listener on loopback only.
 - Direct LAN access must fail; SSH-forwarded access must succeed.
+- If appliance discovery is enabled, `_noob-kvm._tcp` must resolve to the same
+  non-loopback SSH port shown by `ss -H -ltn`. Reject startup when that listener
+  is absent, loopback-only, or moved to another port.
+- Confirm the `_noob-kvm._tcp` TXT record contains only the reviewed `api`,
+  `product`, `version`, and `capabilities` keys. Discovery must contain no
+  bearer, key, password, cookie, host-key fingerprint, gateway URL, camera
+  address, or saved-device identity.
+- Stop `noob-discovery.service`; require scan results to expire while manual
+  private-address pairing remains usable. Confirm `_noobcam._tcp`, target
+  video/HID, the local console, and existing SSH sessions are unaffected.
 - Missing/incorrect tokens, oversized bodies, invalid content types, and absent
   controller leases must fail closed.
 - Logs may contain operation names, byte counts, latency, and result codes, but
   never typed content, frames, credentials, cookies, or authorization headers.
+
+## Optional environmental camera
+
+- With the camera unconfigured, confirm target `/readyz`, video, UART, HID, and
+  local input behave exactly as before.
+- Configure only the camera's private IP literal and distinct mode-0600 bearer
+  token file. Reject hostnames, URLs, loopback, link-local, public, multicast,
+  and unknown configuration keys.
+- Prove camera unreachable, disabled, initialized, fresh-frame, viewer,
+  storage, and target-video states remain independent.
+- Attempt a state mutation with a stale generation and require HTTP 409 without
+  changing the sensor. Repeat after a camera reboot identity changes.
+- With two gateway viewers, verify one ESP32 MJPEG upstream is fanned out and a
+  third viewer above the configured bound is rejected.
+- Return redirects, wrong content types, malformed JSON, duplicate JSON keys,
+  malformed JPEGs, oversized frames, oversized metadata, and timeouts from a
+  controlled test upstream; every case must fail closed without following a
+  new location.
+- List storage with the minimum/maximum page bounds. Reject duplicate query
+  keys, invalid cursors, path traversal, noncanonical media IDs, and out-of-range
+  clip frame indexes before an upstream request.
+- Explicitly create one snapshot and one short clip. Prove clip capture is a
+  bounded asynchronous job, media is retrievable only by opaque ID, and no
+  delete/format/retention mutation route exists.
+- Stop one active clip explicitly. Require `cancelling` then `cancelled`, no
+  published media ID, removal of partial frames, idempotent repeated stop, and
+  deterministic rejection after a job is already complete or failed.
+- Disable the camera and prove the live stream closes, stale frames are not
+  served, storage metadata remains independently reported when supported, and
+  target `/readyz` remains unchanged.
+- Confirm `power_control` remains false and operator copy describes logical
+  sensor/stream state rather than electrical 5 V removal.

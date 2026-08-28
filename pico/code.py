@@ -14,7 +14,7 @@ from adafruit_hid.mouse import Mouse
 from protocol import MAX_LINE_BYTES, ProtocolError, parse_command
 
 
-FIRMWARE_VERSION = "0.1.0"
+FIRMWARE_VERSION = "0.2.0"
 DEFAULT_WATCHDOG_MS = 2000
 MAX_HELD_SECONDS = 10.0
 RESPONSE_CACHE_SIZE = 16

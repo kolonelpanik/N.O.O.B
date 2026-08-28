@@ -193,6 +193,150 @@ describe("GatewayClient capture output", () => {
   });
 });
 
+describe("GatewayClient environmental camera", () => {
+  it("uses only the bounded generation-checked mutation envelopes and never attaches a control lease", async () => {
+    const mediaId = `m_${"b".repeat(32)}`;
+    const jobId = `j_${"c".repeat(32)}`;
+    const camera = {
+      configured: true,
+      reachable: true,
+      device_id: `cam_${"d".repeat(16)}`,
+      stream_enabled: true,
+      sensor_enabled: true,
+      sensor_initialized: true,
+      power_control: false,
+      frame_ready: true,
+      generation: 8,
+      sequence: 4,
+      width: 640,
+      height: 480,
+      last_frame_age_ms: 9,
+      viewers: 1,
+      storage: {
+        state: "mounted",
+        mounted: true,
+        writable: true,
+        total_bytes: 1024,
+        free_bytes: 512,
+        reserve_bytes: 64,
+        media_count: 1,
+        active_job_id: null,
+        limits: {
+          max_media_items: 50,
+          max_total_bytes: 1024,
+          max_clip_duration_ms: 30_000,
+          max_clip_fps: 5,
+          max_clip_frames: 150,
+        },
+        last_error: null,
+      },
+      last_error: null,
+    } as const;
+    const item = {
+      id: mediaId,
+      kind: "snapshot",
+      state: "complete",
+      created_at: null,
+      created_uptime_ms: 10,
+      size_bytes: 100,
+      width: 640,
+      height: 480,
+      frame_count: 1,
+      fps: null,
+      duration_ms: 0,
+      content_type: "image/jpeg",
+    } as const;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ok: true, lease: LEASE, ttl_ms: 5_000 }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, environment_camera: camera }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, item }, 201))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, job_id: jobId, state: "queued" }, 202))
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        job: {
+          job_id: jobId,
+          kind: "clip",
+          state: "running",
+          created_uptime_ms: 12,
+          frames_written: 2,
+          frames_target: 15,
+          media_id: null,
+          error_code: null,
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, job_id: jobId, state: "cancelling" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new GatewayClient("http://127.0.0.1:18765");
+    client.setToken(TOKEN);
+    await client.claim();
+
+    await client.setEnvironmentCamera(true, 7);
+    await client.captureEnvironmentSnapshot(8);
+    await client.startEnvironmentClip(5, 3, 8);
+    await client.getEnvironmentClipJob(jobId);
+    await client.stopEnvironmentClip(jobId);
+
+    const expected = [
+      ["/api/v1/environment-camera/state", { enabled: true, expected_generation: 7 }],
+      ["/api/v1/environment-camera/snapshot", { expected_generation: 8 }],
+      ["/api/v1/environment-camera/clip", { duration_seconds: 5, fps: 3, expected_generation: 8 }],
+      [`/api/v1/environment-camera/jobs/${jobId}`, null],
+      [`/api/v1/environment-camera/jobs/${jobId}/stop`, {}],
+    ] as const;
+    expected.forEach(([path, body], index) => {
+      const [url, init] = fetchMock.mock.calls[index + 1] as [string, RequestInit];
+      expect(url).toBe(`http://127.0.0.1:18765${path}`);
+      expect(body === null ? init.body : JSON.parse(String(init.body))).toEqual(body === null ? undefined : body);
+      const headers = new Headers(init.headers);
+      expect(headers.get("Authorization")).toBe(`Bearer ${TOKEN}`);
+      expect(headers.has("X-NOOB-Lease")).toBe(false);
+    });
+  });
+
+  it("bounds media IDs, frame indexes, cursors, clip duration, and clip frame count before network I/O", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new GatewayClient("http://127.0.0.1:18765");
+    client.setToken(TOKEN);
+
+    await expect(client.environmentMediaContent("../secret")).rejects.toMatchObject({
+      publicError: { code: "invalid_media_id" },
+    });
+    await expect(client.environmentMediaFrame(`m_${"a".repeat(32)}`, 150)).rejects.toMatchObject({
+      publicError: { code: "invalid_environment_media_frame" },
+    });
+    await expect(client.listEnvironmentMedia(20, "../../bad")).rejects.toMatchObject({
+      publicError: { code: "invalid_environment_media_request" },
+    });
+    await expect(client.startEnvironmentClip(31, 1, 2)).rejects.toMatchObject({
+      publicError: { code: "invalid_environment_clip_request" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("proxies only validated snapshot and clip-frame storage paths", async () => {
+    const mediaId = `m_${"f".repeat(32)}`;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {
+        headers: { "Content-Type": "image/jpeg" },
+      }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {
+        headers: { "Content-Type": "image/jpeg" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new GatewayClient("http://127.0.0.1:18765");
+    client.setToken(TOKEN);
+
+    await client.environmentMediaContent(mediaId);
+    await client.environmentMediaFrame(mediaId, 0);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `http://127.0.0.1:18765/api/v1/environment-camera/storage/${mediaId}/content`,
+      `http://127.0.0.1:18765/api/v1/environment-camera/storage/${mediaId}/frames/0.jpg`,
+    ]);
+  });
+});
+
 describe("GatewayClient lease ownership", () => {
   it("exposes ownership without exposing the lease value and releases through the scoped endpoint", async () => {
     const fetchMock = vi.fn()

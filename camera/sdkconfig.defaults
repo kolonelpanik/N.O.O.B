@@ -1,0 +1,42 @@
+# Target and flash geometry. The release build is intentionally limited to the
+# classic ESP32 and the verified 4 MiB/two-large-OTA partition contract.
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHMODE="dio"
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+CONFIG_ESPTOOLPY_FLASHFREQ="40m"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# AI-Thinker-style modules normally have PSRAM. Runtime probing remains the
+# authority; firmware refuses the VGA product mode when PSRAM is unavailable.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+
+# Security 0 remains disabled. Security 1 requires a unique per-device PoP and
+# protects local SoftAP provisioning with X25519 + AES-CTR.
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_0=n
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y
+
+# Keep the interrupt/task watchdogs active. Application workers feed only after
+# forward progress and use bounded I/O operations.
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# Bound HTTP parsing on a small 4 MiB appliance.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=512
+CONFIG_HTTPD_MAX_URI_LEN=192
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# This source baseline is not an eFuse policy. Secure boot and flash encryption
+# require a separate, explicitly accepted manufacturing ceremony.
+CONFIG_SECURE_BOOT=n
+CONFIG_SECURE_FLASH_ENC_ENABLED=n

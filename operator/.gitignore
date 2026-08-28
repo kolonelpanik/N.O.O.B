@@ -1,4 +1,7 @@
 node_modules/
 dist/
 dist-electron/
+build/noob.iconset/
+build/noob.icns
+release/
 *.tsbuildinfo

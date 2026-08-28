@@ -37,7 +37,7 @@ if [ ! -S "$USER_SESSION_BUS" ]; then
     exit 4
 fi
 
-for command in /usr/bin/python3 /usr/bin/xdotool /usr/bin/sudo /usr/bin/xfconf-query; do
+for command in /usr/bin/python3 /usr/bin/xdotool /usr/bin/wmctrl /usr/bin/xprop /usr/bin/xwininfo /usr/bin/sudo /usr/bin/xfconf-query; do
     if [ ! -x "$command" ]; then
         echo "missing dependency: $command" >&2
         exit 5
@@ -52,6 +52,9 @@ fi
 /usr/bin/install -d -m 0755 /opt/noob/appliance
 /usr/bin/install -m 0755 "$SOURCE_ROOT/appliance/noob_local_console.py" /opt/noob/appliance/noob_local_console.py
 /usr/bin/install -m 0755 "$SOURCE_ROOT/appliance/noob-local-console-toggle" /opt/noob/appliance/noob-local-console-toggle
+/usr/bin/install -m 0755 "$SOURCE_ROOT/scripts/noob_pairing_code.py" /opt/noob/appliance/noob_pairing_code.py
+/usr/bin/install -d -m 0755 /usr/local/bin
+/usr/bin/install -m 0755 "$SOURCE_ROOT/scripts/noob_pairing_code.py" /usr/local/bin/noob-pairing-code
 
 sudoers_tmp="$(/usr/bin/mktemp)"
 token_tmp=''
@@ -103,6 +106,32 @@ fi
 /usr/bin/install -m 0644 \
     "$SOURCE_ROOT/packaging/noob-local-console.desktop" \
     /usr/local/share/applications/noob-local-console.desktop
+/usr/bin/install -d -m 0755 /usr/local/share/icons/hicolor/scalable/apps
+/usr/bin/install -m 0644 \
+    "$SOURCE_ROOT/design/noob-icon.svg" \
+    /usr/local/share/icons/hicolor/scalable/apps/noob.svg
+
+# Put a real launcher on the operator's XFCE desktop.  Every user-home
+# mutation runs as that user, so root neither creates writable-home content nor
+# follows a user-controlled destination path.  XFCE can still ask for launch
+# confirmation on its first use when the GVfs trust attribute is unavailable.
+DESKTOP_DIR="$USER_HOME/Desktop"
+/usr/bin/sudo -n -u "#$USER_UID" /usr/bin/install -d -m 0755 "$DESKTOP_DIR"
+/usr/bin/sudo -n -u "#$USER_UID" /usr/bin/install -m 0755 \
+    /usr/local/share/applications/noob-local-console.desktop \
+    "$DESKTOP_DIR/N.O.O.B Local Console.desktop"
+if [ -x /usr/bin/gio ]; then
+    /usr/bin/sudo -n -u "#$USER_UID" /usr/bin/env \
+        XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$USER_SESSION_BUS" \
+        /usr/bin/gio set \
+        "$DESKTOP_DIR/N.O.O.B Local Console.desktop" \
+        metadata::trusted true >/dev/null 2>&1 || true
+fi
+if [ -x /usr/bin/gtk-update-icon-cache ]; then
+    /usr/bin/gtk-update-icon-cache -q -f /usr/local/share/icons/hicolor \
+        >/dev/null 2>&1 || true
+fi
 
 shortcut='/commands/custom/<Super>n'
 run_xfconf() {
@@ -121,4 +150,4 @@ elif [ "$current" != '/opt/noob/appliance/noob-local-console-toggle' ]; then
     echo "Super+N is already assigned; launcher installed without replacing it" >&2
 fi
 
-echo "N.O.O.B local console and scoped credential installed. Restart the gateway after enabling auth.local_token_file, then launch from the menu or press Super+N."
+echo "N.O.O.B local console, pairing-code helper, desktop icon, and scoped credential installed. Restart the gateway after enabling auth.local_token_file, then launch from the desktop, menu, or Super+N."

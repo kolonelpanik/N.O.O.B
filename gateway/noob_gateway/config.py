@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import ipaddress
-from pathlib import Path
 import re
 import tomllib
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .models import KEY_NAMES
@@ -17,7 +17,15 @@ class ConfigError(ValueError):
 
 
 VIDEO_FRAME_HARD_CEILING = 16 * 1024 * 1024
+ENVIRONMENT_CAMERA_MEDIA_HARD_CEILING = 128 * 1024 * 1024
 _VIDEO_MODE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_ENVIRONMENT_CAMERA_DEVICE_ID = re.compile(r"^cam_[0-9a-f]{16}$")
+_CAMERA_ALLOWED_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +173,34 @@ class VideoConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class EnvironmentCameraConfig:
+    """Fixed, private-network upstream for the optional room camera.
+
+    The caller never supplies a URL.  The gateway constructs every upstream
+    request from this validated IP literal plus protocol-owned fixed paths.
+    """
+
+    enabled: bool = False
+    host: str | None = None
+    expected_device_id: str | None = None
+    port: int = 80
+    token_file: str | None = None
+    connect_timeout_seconds: float = 1.5
+    request_timeout_seconds: float = 4.0
+    stream_read_timeout_seconds: float = 10.0
+    status_interval_seconds: float = 2.0
+    reconnect_ms: int = 1000
+    stale_seconds: float = 3.0
+    max_frame_bytes: int = 2 * 1024 * 1024
+    max_metadata_bytes: int = 64 * 1024
+    max_media_bytes: int = 64 * 1024 * 1024
+    max_clients: int = 2
+    max_page_size: int = 50
+    max_clip_seconds: int = 30
+    max_clip_fps: int = 5
+
+
+@dataclass(frozen=True, slots=True)
 class LimitsConfig:
     max_body_bytes: int = 4096
     max_type_chars: int = 512
@@ -208,12 +244,21 @@ class GatewayConfig:
     auth: AuthConfig = AuthConfig()
     serial: SerialConfig = SerialConfig()
     video: VideoConfig = VideoConfig()
+    environment_camera: EnvironmentCameraConfig = EnvironmentCameraConfig()
     limits: LimitsConfig = LimitsConfig()
     local_input: LocalInputConfig = LocalInputConfig()
 
 
 _SECTIONS = frozenset(
-    ("server", "auth", "serial", "video", "limits", "local_input")
+    (
+        "server",
+        "auth",
+        "serial",
+        "video",
+        "environment_camera",
+        "limits",
+        "local_input",
+    )
 )
 
 
@@ -528,6 +573,183 @@ def load_config(path: str | Path) -> GatewayConfig:
         max_clients=_integer(video_raw.get("max_clients", 4), "video.max_clients", 1, 32),
     )
 
+    environment_raw = _section(
+        raw,
+        "environment_camera",
+        {
+            "enabled",
+            "host",
+            "expected_device_id",
+            "port",
+            "token_file",
+            "connect_timeout_seconds",
+            "request_timeout_seconds",
+            "stream_read_timeout_seconds",
+            "status_interval_seconds",
+            "reconnect_ms",
+            "stale_seconds",
+            "max_frame_bytes",
+            "max_metadata_bytes",
+            "max_media_bytes",
+            "max_clients",
+            "max_page_size",
+            "max_clip_seconds",
+            "max_clip_fps",
+        },
+    )
+    environment_enabled = _boolean(
+        environment_raw.get("enabled", False), "environment_camera.enabled"
+    )
+    environment_host_raw = environment_raw.get("host")
+    environment_host: str | None = None
+    if environment_host_raw is not None:
+        if not isinstance(environment_host_raw, str):
+            raise ConfigError("environment_camera.host must be an IP address")
+        try:
+            environment_address = ipaddress.ip_address(environment_host_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                "environment_camera.host must be a private IP address literal"
+            ) from exc
+        if not any(
+            environment_address in network
+            for network in _CAMERA_ALLOWED_NETWORKS
+            if network.version == environment_address.version
+        ):
+            raise ConfigError(
+                "environment_camera.host must be an RFC1918 or unique-local IP address"
+            )
+        environment_host = str(environment_address)
+
+    environment_token_raw = environment_raw.get("token_file")
+    environment_token_file = (
+        _path(environment_token_raw, "environment_camera.token_file")
+        if environment_token_raw is not None
+        else None
+    )
+    if environment_enabled and environment_host is None:
+        raise ConfigError(
+            "enabled environment camera requires environment_camera.host"
+        )
+    if environment_enabled and environment_token_file is None:
+        raise ConfigError(
+            "enabled environment camera requires environment_camera.token_file"
+        )
+    environment_device_id_raw = environment_raw.get("expected_device_id")
+    environment_device_id: str | None = None
+    if environment_device_id_raw is not None:
+        if (
+            not isinstance(environment_device_id_raw, str)
+            or _ENVIRONMENT_CAMERA_DEVICE_ID.fullmatch(environment_device_id_raw)
+            is None
+        ):
+            raise ConfigError(
+                "environment_camera.expected_device_id must match cam_[0-9a-f]{16}"
+            )
+        environment_device_id = environment_device_id_raw
+    if environment_enabled and environment_device_id is None:
+        raise ConfigError(
+            "enabled environment camera requires environment_camera.expected_device_id"
+        )
+    if environment_token_file is not None and environment_token_file in {
+        auth.token_file,
+        auth.local_token_file,
+    }:
+        raise ConfigError(
+            "environment camera token must be distinct from gateway credentials"
+        )
+    environment_camera = EnvironmentCameraConfig(
+        enabled=environment_enabled,
+        host=environment_host,
+        expected_device_id=environment_device_id,
+        port=_integer(
+            environment_raw.get("port", 80), "environment_camera.port", 1, 65535
+        ),
+        token_file=environment_token_file,
+        connect_timeout_seconds=_number(
+            environment_raw.get("connect_timeout_seconds", 1.5),
+            "environment_camera.connect_timeout_seconds",
+            0.2,
+            10.0,
+        ),
+        request_timeout_seconds=_number(
+            environment_raw.get("request_timeout_seconds", 4.0),
+            "environment_camera.request_timeout_seconds",
+            0.5,
+            30.0,
+        ),
+        stream_read_timeout_seconds=_number(
+            environment_raw.get("stream_read_timeout_seconds", 10.0),
+            "environment_camera.stream_read_timeout_seconds",
+            2.0,
+            60.0,
+        ),
+        status_interval_seconds=_number(
+            environment_raw.get("status_interval_seconds", 2.0),
+            "environment_camera.status_interval_seconds",
+            0.5,
+            30.0,
+        ),
+        reconnect_ms=_integer(
+            environment_raw.get("reconnect_ms", 1000),
+            "environment_camera.reconnect_ms",
+            100,
+            30_000,
+        ),
+        stale_seconds=_number(
+            environment_raw.get("stale_seconds", 3.0),
+            "environment_camera.stale_seconds",
+            0.5,
+            30.0,
+        ),
+        max_frame_bytes=_integer(
+            environment_raw.get("max_frame_bytes", 2 * 1024 * 1024),
+            "environment_camera.max_frame_bytes",
+            64 * 1024,
+            VIDEO_FRAME_HARD_CEILING,
+        ),
+        max_metadata_bytes=_integer(
+            environment_raw.get("max_metadata_bytes", 64 * 1024),
+            "environment_camera.max_metadata_bytes",
+            1024,
+            1024 * 1024,
+        ),
+        max_media_bytes=_integer(
+            environment_raw.get("max_media_bytes", 64 * 1024 * 1024),
+            "environment_camera.max_media_bytes",
+            64 * 1024,
+            ENVIRONMENT_CAMERA_MEDIA_HARD_CEILING,
+        ),
+        max_clients=_integer(
+            environment_raw.get("max_clients", 2),
+            "environment_camera.max_clients",
+            1,
+            8,
+        ),
+        max_page_size=_integer(
+            environment_raw.get("max_page_size", 50),
+            "environment_camera.max_page_size",
+            1,
+            50,
+        ),
+        max_clip_seconds=_integer(
+            environment_raw.get("max_clip_seconds", 30),
+            "environment_camera.max_clip_seconds",
+            1,
+            30,
+        ),
+        max_clip_fps=_integer(
+            environment_raw.get("max_clip_fps", 5),
+            "environment_camera.max_clip_fps",
+            1,
+            5,
+        ),
+    )
+    if environment_camera.max_media_bytes < environment_camera.max_frame_bytes:
+        raise ConfigError(
+            "environment_camera.max_media_bytes must cover max_frame_bytes"
+        )
+
     limits_raw = _section(
         raw,
         "limits",
@@ -635,6 +857,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         auth=auth,
         serial=serial,
         video=video,
+        environment_camera=environment_camera,
         limits=limits,
         local_input=local_input,
     )

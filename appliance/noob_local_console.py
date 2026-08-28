@@ -10,11 +10,18 @@ local-input endpoints.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import base64
+from dataclasses import dataclass, replace
+from datetime import datetime
+import fcntl
+import hashlib
 from io import BytesIO
 import json
+import os
+from pathlib import Path
 import queue
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -26,6 +33,9 @@ from urllib import error, parse, request
 
 APP_TITLE = "N.O.O.B Local Console"
 DEFAULT_GATEWAY = "http://127.0.0.1:8765"
+DEFAULT_SSH_HOST_PUBLIC_KEY = Path("/etc/ssh/ssh_host_ed25519_key.pub")
+PAIRING_CODE_DOMAIN_SEPARATOR = b"N.O.O.B. pairing code v1\0"
+MAX_SSH_PUBLIC_KEY_BYTES = 16 * 1024
 DEFAULT_TOKEN_COMMAND = (
     "/usr/bin/sudo",
     "-n",
@@ -36,8 +46,16 @@ DEFAULT_TOKEN_COMMAND = (
 )
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MODE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+CURSOR_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+MEDIA_ID = re.compile(r"^m_[0-9a-f]{32}$")
+JOB_ID = re.compile(r"^j_[0-9a-f]{32}$")
 MAX_FRAME_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_STORAGE_RESPONSE_BYTES = 128 * 1024
+MAX_STORAGE_ITEMS = 50
 VIDEO_MODE_REQUEST_TIMEOUT = 65.0
+CAMERA_ACTION_TIMEOUT = 35.0
+VIEW_SOURCES = frozenset(("target", "environment"))
+ZOOM_MODES = ("FIT", "100%", "200%")
 VIDEO_STATES = frozenset(
     {
         "starting",
@@ -63,12 +81,170 @@ DANGER = "#ff3a42"
 WARN = "#f2b84b"
 
 
+class LocalConsoleInstanceLock:
+    def __init__(self, descriptor: int, path: Path) -> None:
+        self._descriptor = descriptor
+        self.path = path
+
+    def close(self) -> None:
+        descriptor, self._descriptor = self._descriptor, -1
+        if descriptor < 0:
+            return
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+    def __enter__(self) -> LocalConsoleInstanceLock:
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+
+def user_runtime_directory(
+    *,
+    environ: dict[str, str] | None = None,
+    uid: int | None = None,
+) -> Path:
+    values = os.environ if environ is None else environ
+    current_uid = os.getuid() if uid is None else uid
+    configured = values.get("XDG_RUNTIME_DIR", "").strip()
+    try:
+        runtime = Path(configured) if configured else Path(f"/run/user/{current_uid}")
+    except (TypeError, ValueError) as exc:
+        raise LocalConsoleError("instance_lock_unavailable") from exc
+    if not runtime.is_absolute():
+        raise LocalConsoleError("instance_lock_unavailable")
+    try:
+        details = runtime.lstat()
+    except (OSError, ValueError) as exc:
+        raise LocalConsoleError("instance_lock_unavailable") from exc
+    if (
+        stat.S_ISLNK(details.st_mode)
+        or not stat.S_ISDIR(details.st_mode)
+        or details.st_uid != current_uid
+        or stat.S_IMODE(details.st_mode) & 0o077
+    ):
+        raise LocalConsoleError("instance_lock_unavailable")
+    return runtime
+
+
+def acquire_local_console_instance_lock(
+    runtime_directory: Path | None = None,
+) -> LocalConsoleInstanceLock:
+    runtime = user_runtime_directory() if runtime_directory is None else runtime_directory
+    lock_path = runtime / "noob-local-console.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+        details = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.getuid()
+            or stat.S_IMODE(details.st_mode) & 0o077
+        ):
+            raise LocalConsoleError("instance_lock_unavailable")
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise LocalConsoleError("already_running") from exc
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
+        return LocalConsoleInstanceLock(descriptor, lock_path)
+    except LocalConsoleError:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise
+    except OSError as exc:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise LocalConsoleError("instance_lock_unavailable") from exc
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _bounded_int(value: Any, minimum: int, maximum: int, code: str) -> int:
+    if not _is_int(value) or not minimum <= value <= maximum:
+        raise LocalConsoleError(code)
+    return value
+
+
+def _bounded_optional_int(
+    value: Any, minimum: int, maximum: int, code: str
+) -> int | None:
+    if value is None:
+        return None
+    return _bounded_int(value, minimum, maximum, code)
+
+
 class LocalConsoleError(RuntimeError):
     """Bounded error safe for the appliance UI."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code if ERROR_CODE.fullmatch(code) else "operation_failed"
+
+
+def fingerprint_for_ssh_host_public_key(text: str) -> str:
+    """Return the OpenSSH SHA256 identity for an Ed25519 public host key."""
+
+    fields = text.strip().split()
+    if len(fields) < 2 or fields[0] != "ssh-ed25519":
+        raise LocalConsoleError("pairing_identity_unavailable")
+    try:
+        key = base64.b64decode(fields[1], validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise LocalConsoleError("pairing_identity_unavailable") from exc
+    if not 32 <= len(key) <= MAX_SSH_PUBLIC_KEY_BYTES:
+        raise LocalConsoleError("pairing_identity_unavailable")
+    encoded = base64.b64encode(hashlib.sha256(key).digest()).decode("ascii")
+    return f"SHA256:{encoded.rstrip('=')}"
+
+
+def pairing_code_for_ssh_fingerprint(fingerprint: str) -> str:
+    """Derive the human comparison code without weakening the full key pin."""
+
+    try:
+        material = fingerprint.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise LocalConsoleError("pairing_identity_unavailable") from exc
+    digest = hashlib.sha256(PAIRING_CODE_DOMAIN_SEPARATOR + material).digest()
+    digits = f"{int.from_bytes(digest[:4], 'big') % 100_000_000:08d}"
+    return f"{digits[:4]}-{digits[4:]}"
+
+
+def load_local_pairing_identity(
+    public_key_path: Path = DEFAULT_SSH_HOST_PUBLIC_KEY,
+) -> tuple[str, str]:
+    """Read a bounded, non-symlink host public key and return code + fingerprint."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(public_key_path, flags)
+    except (OSError, TypeError, ValueError) as exc:
+        raise LocalConsoleError("pairing_identity_unavailable") from exc
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode) or not 0 < details.st_size <= MAX_SSH_PUBLIC_KEY_BYTES:
+            raise LocalConsoleError("pairing_identity_unavailable")
+        raw = os.read(descriptor, MAX_SSH_PUBLIC_KEY_BYTES + 1)
+        if len(raw) > MAX_SSH_PUBLIC_KEY_BYTES or os.read(descriptor, 1):
+            raise LocalConsoleError("pairing_identity_unavailable")
+    except OSError as exc:
+        raise LocalConsoleError("pairing_identity_unavailable") from exc
+    finally:
+        os.close(descriptor)
+    try:
+        fingerprint = fingerprint_for_ssh_host_public_key(raw.decode("ascii"))
+    except UnicodeDecodeError as exc:
+        raise LocalConsoleError("pairing_identity_unavailable") from exc
+    return pairing_code_for_ssh_fingerprint(fingerprint), fingerprint
 
 
 class NoRedirectHandler(request.HTTPRedirectHandler):
@@ -166,6 +342,120 @@ def load_local_token(
 
 
 @dataclass(frozen=True, slots=True)
+class CameraStorageState:
+    state: str
+    mounted: bool
+    writable: bool
+    total_bytes: int | None
+    free_bytes: int | None
+    reserve_bytes: int
+    media_count: int
+    active_job_id: str | None
+    max_media_items: int
+    max_total_bytes: int
+    max_clip_duration_ms: int
+    max_clip_fps: int
+    max_clip_frames: int
+    last_error: str | None
+
+    @property
+    def available(self) -> bool:
+        return self.mounted and self.state in {"mounted", "read_only", "full"}
+
+    @classmethod
+    def unavailable(cls) -> CameraStorageState:
+        return cls(
+            "unconfigured",
+            False,
+            False,
+            None,
+            None,
+            0,
+            0,
+            None,
+            0,
+            0,
+            30_000,
+            5,
+            150,
+            None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentCameraState:
+    configured: bool
+    reachable: bool
+    stream_enabled: bool
+    sensor_enabled: bool
+    power_control: bool
+    frame_ready: bool
+    generation: int
+    last_frame_age_ms: int | None
+    viewers: int
+    storage: CameraStorageState
+    last_error: str | None
+
+    @classmethod
+    def unconfigured(cls) -> EnvironmentCameraState:
+        return cls(
+            configured=False,
+            reachable=False,
+            stream_enabled=False,
+            sensor_enabled=False,
+            power_control=False,
+            frame_ready=False,
+            generation=0,
+            last_frame_age_ms=None,
+            viewers=0,
+            storage=CameraStorageState.unavailable(),
+            last_error=None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CameraStorageItem:
+    item_id: str
+    kind: str
+    created_at: str | None
+    created_uptime_ms: int
+    size_bytes: int
+    width: int
+    height: int
+    frame_count: int
+    fps: int | None
+    duration_ms: int
+    content_type: str
+
+    @property
+    def display_label(self) -> str:
+        size = format_byte_count(self.size_bytes)
+        timestamp = self.created_at or f"uptime {self.created_uptime_ms} ms"
+        duration = f" · {self.duration_ms / 1000:.1f}s" if self.kind == "clip" else ""
+        return (
+            f"{self.kind.upper()} · {timestamp} · "
+            f"{self.width}×{self.height}{duration} · {size}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CameraStorageCatalog:
+    storage: CameraStorageState
+    items: tuple[CameraStorageItem, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CameraClipJob:
+    job_id: str
+    state: str
+    frames_written: int
+    frames_target: int
+    media_id: str | None
+    error_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ViewState:
     video_ready: bool
     serial_ready: bool
@@ -182,6 +472,7 @@ class ViewState:
     requested_signal: tuple[int, int, int | float, str] | None
     negotiated_signal: tuple[int, int, int | float, str] | None
     source_timing_detectable: bool
+    environment_camera: EnvironmentCameraState
 
     @property
     def remote_control_active(self) -> bool:
@@ -264,6 +555,596 @@ def _signal_from_payload(value: Any) -> tuple[int, int, int | float, str] | None
     return (width, height, fps, pixel_format)
 
 
+def format_byte_count(value: int | None) -> str:
+    if value is None:
+        return "—"
+    amount = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if amount < 1024.0 or unit == "TB":
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024.0
+    return "—"
+
+
+def camera_storage_state_from_payload(value: Any) -> CameraStorageState:
+    if not isinstance(value, dict):
+        raise LocalConsoleError("camera_storage_unavailable")
+    state = value.get("state")
+    if state not in {
+        "unconfigured",
+        "mounting",
+        "mounted",
+        "absent",
+        "read_only",
+        "full",
+        "error",
+    }:
+        raise LocalConsoleError("camera_storage_unavailable")
+    if not isinstance(value.get("mounted"), bool) or not isinstance(
+        value.get("writable"), bool
+    ):
+        raise LocalConsoleError("camera_storage_unavailable")
+    limits = value.get("limits")
+    if not isinstance(limits, dict):
+        raise LocalConsoleError("camera_storage_unavailable")
+    active_job_id = value.get("active_job_id")
+    last_error = value.get("last_error")
+    if active_job_id is not None and (
+        not isinstance(active_job_id, str) or JOB_ID.fullmatch(active_job_id) is None
+    ):
+        raise LocalConsoleError("camera_storage_unavailable")
+    if last_error is not None and (
+        not isinstance(last_error, str) or ERROR_CODE.fullmatch(last_error) is None
+    ):
+        raise LocalConsoleError("camera_storage_unavailable")
+    total_bytes = _bounded_optional_int(
+        value.get("total_bytes"), 0, 1 << 50, "camera_storage_unavailable"
+    )
+    free_bytes = _bounded_optional_int(
+        value.get("free_bytes"), 0, 1 << 50, "camera_storage_unavailable"
+    )
+    if total_bytes is not None and free_bytes is not None and free_bytes > total_bytes:
+        raise LocalConsoleError("camera_storage_unavailable")
+    return CameraStorageState(
+        state=state,
+        mounted=value["mounted"],
+        writable=value["writable"],
+        total_bytes=total_bytes,
+        free_bytes=free_bytes,
+        reserve_bytes=_bounded_int(
+            value.get("reserve_bytes"), 0, 1 << 40, "camera_storage_unavailable"
+        ),
+        media_count=_bounded_int(
+            value.get("media_count"), 0, 10_000_000, "camera_storage_unavailable"
+        ),
+        active_job_id=active_job_id,
+        max_media_items=_bounded_int(
+            limits.get("max_media_items"),
+            0,
+            10_000_000,
+            "camera_storage_unavailable",
+        ),
+        max_total_bytes=_bounded_int(
+            limits.get("max_total_bytes"),
+            0,
+            1 << 50,
+            "camera_storage_unavailable",
+        ),
+        max_clip_duration_ms=_bounded_int(
+            limits.get("max_clip_duration_ms"),
+            1000,
+            30_000,
+            "camera_storage_unavailable",
+        ),
+        max_clip_fps=_bounded_int(
+            limits.get("max_clip_fps"), 1, 5, "camera_storage_unavailable"
+        ),
+        max_clip_frames=_bounded_int(
+            limits.get("max_clip_frames"), 1, 150, "camera_storage_unavailable"
+        ),
+        last_error=last_error,
+    )
+
+
+def environment_camera_from_payload(value: Any) -> EnvironmentCameraState:
+    if not isinstance(value, dict):
+        raise LocalConsoleError("camera_status_unavailable")
+    storage = value.get("storage")
+    if not isinstance(storage, dict):
+        raise LocalConsoleError("camera_status_unavailable")
+
+    bool_fields = (
+        "configured",
+        "reachable",
+        "stream_enabled",
+        "sensor_enabled",
+        "power_control",
+        "frame_ready",
+    )
+    if any(not isinstance(value.get(name), bool) for name in bool_fields):
+        raise LocalConsoleError("camera_status_unavailable")
+
+    last_error = value.get("last_error")
+    if last_error is not None and (
+        not isinstance(last_error, str) or ERROR_CODE.fullmatch(last_error) is None
+    ):
+        raise LocalConsoleError("camera_status_unavailable")
+
+    generation = _bounded_int(
+        value.get("generation"), 0, 2**63 - 1, "camera_status_unavailable"
+    )
+    viewers = _bounded_int(
+        value.get("viewers"), 0, 1024, "camera_status_unavailable"
+    )
+    last_frame_age_ms = _bounded_optional_int(
+        value.get("last_frame_age_ms"),
+        0,
+        24 * 60 * 60 * 1000,
+        "camera_status_unavailable",
+    )
+    try:
+        storage_state = camera_storage_state_from_payload(storage)
+    except LocalConsoleError as exc:
+        raise LocalConsoleError("camera_status_unavailable") from exc
+
+    return EnvironmentCameraState(
+        configured=value["configured"],
+        reachable=value["reachable"],
+        stream_enabled=value["stream_enabled"],
+        sensor_enabled=value["sensor_enabled"],
+        power_control=value["power_control"],
+        frame_ready=value["frame_ready"],
+        generation=generation,
+        last_frame_age_ms=last_frame_age_ms,
+        viewers=viewers,
+        storage=storage_state,
+        last_error=last_error,
+    )
+
+
+def environment_camera_from_response(payload: Any) -> EnvironmentCameraState:
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise LocalConsoleError("camera_status_unavailable")
+    return environment_camera_from_payload(payload.get("environment_camera"))
+
+
+def camera_storage_item_from_payload(value: Any) -> CameraStorageItem:
+    if not isinstance(value, dict):
+        raise LocalConsoleError("camera_storage_unavailable")
+    item_id = value.get("id")
+    kind = value.get("kind")
+    created_at = value.get("created_at")
+    duration_ms = value.get("duration_ms")
+    if (
+        not isinstance(item_id, str)
+        or MEDIA_ID.fullmatch(item_id) is None
+        or kind not in {"snapshot", "clip"}
+        or value.get("state") != "complete"
+        or (
+            created_at is not None
+            and (
+                not isinstance(created_at, str)
+                or not 1 <= len(created_at) <= 64
+                or any(ord(char) < 32 or ord(char) == 127 for char in created_at)
+            )
+        )
+    ):
+        raise LocalConsoleError("camera_storage_unavailable")
+    frame_count = _bounded_int(
+        value.get("frame_count"), 1, 150, "camera_storage_unavailable"
+    )
+    fps = _bounded_optional_int(
+        value.get("fps"), 1, 5, "camera_storage_unavailable"
+    )
+    duration_ms = _bounded_int(
+        duration_ms, 0, 30_000, "camera_storage_unavailable"
+    )
+    content_type = value.get("content_type")
+    if kind == "snapshot" and (
+        frame_count != 1
+        or fps is not None
+        or duration_ms != 0
+        or content_type != "image/jpeg"
+    ):
+        raise LocalConsoleError("camera_storage_unavailable")
+    if kind == "clip" and (
+        fps is None
+        or duration_ms < 1000
+        or content_type != "application/vnd.noob.clip+json"
+    ):
+        raise LocalConsoleError("camera_storage_unavailable")
+    return CameraStorageItem(
+        item_id=item_id,
+        kind=kind,
+        created_at=created_at,
+        created_uptime_ms=_bounded_int(
+            value.get("created_uptime_ms"),
+            0,
+            1 << 62,
+            "camera_storage_unavailable",
+        ),
+        size_bytes=_bounded_int(
+            value.get("size_bytes"), 1, 1 << 50, "camera_storage_unavailable"
+        ),
+        width=_bounded_int(
+            value.get("width"), 1, 8192, "camera_storage_unavailable"
+        ),
+        height=_bounded_int(
+            value.get("height"), 1, 8192, "camera_storage_unavailable"
+        ),
+        frame_count=frame_count,
+        fps=fps,
+        duration_ms=duration_ms,
+        content_type=content_type,
+    )
+
+
+def camera_storage_from_payload(payload: Any) -> CameraStorageCatalog:
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise LocalConsoleError("camera_storage_unavailable")
+    raw_items = payload.get("items")
+    next_cursor = payload.get("next_cursor")
+    if (
+        not isinstance(raw_items, list)
+        or len(raw_items) > MAX_STORAGE_ITEMS
+        or (
+            next_cursor is not None
+            and (
+                not isinstance(next_cursor, str)
+                or CURSOR_ID.fullmatch(next_cursor) is None
+            )
+        )
+    ):
+        raise LocalConsoleError("camera_storage_unavailable")
+    items = tuple(camera_storage_item_from_payload(item) for item in raw_items)
+    if len({item.item_id for item in items}) != len(items):
+        raise LocalConsoleError("camera_storage_unavailable")
+    storage = camera_storage_state_from_payload(payload.get("storage"))
+    return CameraStorageCatalog(storage, items, next_cursor)
+
+
+def camera_clip_job_from_payload(payload: Any) -> CameraClipJob:
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise LocalConsoleError("camera_clip_unconfirmed")
+    value = payload.get("job")
+    if not isinstance(value, dict):
+        raise LocalConsoleError("camera_clip_unconfirmed")
+    job_id = value.get("job_id")
+    state = value.get("state")
+    media_id = value.get("media_id")
+    error_code = value.get("error_code")
+    if (
+        not isinstance(job_id, str)
+        or JOB_ID.fullmatch(job_id) is None
+        or value.get("kind") != "clip"
+        or state not in {
+            "queued",
+            "running",
+            "cancelling",
+            "complete",
+            "failed",
+            "cancelled",
+        }
+        or (media_id is not None and (not isinstance(media_id, str) or MEDIA_ID.fullmatch(media_id) is None))
+        or (error_code is not None and (not isinstance(error_code, str) or ERROR_CODE.fullmatch(error_code) is None))
+    ):
+        raise LocalConsoleError("camera_clip_unconfirmed")
+    frames_written = _bounded_int(
+        value.get("frames_written"), 0, 150, "camera_clip_unconfirmed"
+    )
+    frames_target = _bounded_int(
+        value.get("frames_target"), 1, 150, "camera_clip_unconfirmed"
+    )
+    _bounded_int(
+        value.get("created_uptime_ms"),
+        0,
+        1 << 62,
+        "camera_clip_unconfirmed",
+    )
+    if frames_written > frames_target:
+        raise LocalConsoleError("camera_clip_unconfirmed")
+    if state == "complete" and media_id is None:
+        raise LocalConsoleError("camera_clip_unconfirmed")
+    if state == "failed" and error_code is None:
+        raise LocalConsoleError("camera_clip_unconfirmed")
+    return CameraClipJob(
+        job_id, state, frames_written, frames_target, media_id, error_code
+    )
+
+
+def fullscreen_geometry(screen_width: int, screen_height: int) -> str:
+    if not 320 <= screen_width <= 16_384 or not 240 <= screen_height <= 16_384:
+        raise ValueError("screen dimensions are outside the supported range")
+    return f"{screen_width}x{screen_height}+0+0"
+
+
+def window_covers_screen(root: Any, *, tolerance: int = 3) -> bool:
+    """Verify the mapped client area covers the physical screen edge to edge."""
+
+    root.update_idletasks()
+    screen_width = int(root.winfo_screenwidth())
+    screen_height = int(root.winfo_screenheight())
+    return bool(
+        abs(int(root.winfo_rootx())) <= tolerance
+        and abs(int(root.winfo_rooty())) <= tolerance
+        and abs(int(root.winfo_width()) - screen_width) <= tolerance
+        and abs(int(root.winfo_height()) - screen_height) <= tolerance
+    )
+
+
+def xfce_fullscreen_commands(
+    window_id: int,
+    screen_width: int,
+    screen_height: int,
+    *,
+    enabled: bool,
+) -> tuple[tuple[str, ...], ...]:
+    """Build fixed-argument EWMH commands; no title, shell, or user input."""
+
+    if (
+        not _is_int(window_id)
+        or window_id <= 0
+        or not isinstance(enabled, bool)
+    ):
+        raise ValueError("invalid window identity")
+    fullscreen_geometry(screen_width, screen_height)
+    identity = f"0x{window_id:x}"
+    if enabled:
+        return (
+            (
+                "/usr/bin/wmctrl",
+                "-i",
+                "-r",
+                identity,
+                "-b",
+                "add,fullscreen,above",
+            ),
+            (
+                "/usr/bin/wmctrl",
+                "-i",
+                "-r",
+                identity,
+                "-e",
+                f"0,0,0,{screen_width},{screen_height}",
+            ),
+            # Tk/XFCE can leave an override-redirect toplevel unmapped after
+            # withdraw/deiconify even though its geometry is correct.  Map the
+            # already-validated numeric XID explicitly; this is idempotent for
+            # a window that the WM already mapped.
+            (
+                "/usr/bin/xdotool",
+                "windowmap",
+                "--sync",
+                str(window_id),
+            ),
+        )
+    return (
+        (
+            "/usr/bin/wmctrl",
+            "-i",
+            "-r",
+            identity,
+            "-b",
+            "remove,fullscreen,above",
+        ),
+        (
+            "/usr/bin/xdotool",
+            "windowmap",
+            "--sync",
+            str(window_id),
+        ),
+    )
+
+
+def run_wm_commands(
+    commands: tuple[tuple[str, ...], ...],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> bool:
+    """Apply best-effort XFCE EWMH hints without weakening Tk's fallback."""
+
+    successful = True
+    for command in commands:
+        try:
+            completed = runner(
+                command,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError):
+            successful = False
+            continue
+        successful = successful and completed.returncode == 0
+    return successful
+
+
+class FullscreenController:
+    """Force true borderless fullscreen while retaining a restorable WM state.
+
+    XFCE may treat Tk's ``-fullscreen`` attribute as a request rather than a
+    guarantee.  An override-redirect window plus explicit physical-screen
+    geometry removes decorations and panel reservations; the fullscreen hint is
+    still set so compositors can optimize presentation.
+    """
+
+    def __init__(
+        self,
+        root: Any,
+        *,
+        command_runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    ) -> None:
+        self.root = root
+        self.command_runner = command_runner
+        self.active = False
+        self.normal_geometry = ""
+
+    def enter(self) -> None:
+        if self.active:
+            self.enforce()
+            return
+        self.root.update_idletasks()
+        self.normal_geometry = str(self.root.geometry())
+        self.active = True
+        commands = xfce_fullscreen_commands(
+            int(self.root.winfo_id()),
+            int(self.root.winfo_screenwidth()),
+            int(self.root.winfo_screenheight()),
+            enabled=True,
+        )
+        run_wm_commands(commands, runner=self.command_runner)
+        # Re-map the window after changing override-redirect.  XFCE otherwise
+        # may keep the old decorated frame and its panel work-area constraint.
+        self.root.withdraw()
+        self.root.overrideredirect(True)
+        self.root.attributes("-fullscreen", True)
+        self.root.attributes("-topmost", True)
+        self.root.geometry(
+            fullscreen_geometry(
+                int(self.root.winfo_screenwidth()),
+                int(self.root.winfo_screenheight()),
+            )
+        )
+        self.root.deiconify()
+        self.root.state("normal")
+        self.enforce()
+
+    def enforce(self) -> None:
+        if not self.active:
+            return
+        geometry = fullscreen_geometry(
+            int(self.root.winfo_screenwidth()), int(self.root.winfo_screenheight())
+        )
+        self.root.geometry(geometry)
+        run_wm_commands(
+            xfce_fullscreen_commands(
+                int(self.root.winfo_id()),
+                int(self.root.winfo_screenwidth()),
+                int(self.root.winfo_screenheight()),
+                enabled=True,
+            ),
+            runner=self.command_runner,
+        )
+        self.root.lift()
+        self.root.focus_force()
+        self.root.update_idletasks()
+
+    def exit(self, *, topmost: bool) -> None:
+        if not self.active:
+            self.root.attributes("-topmost", topmost)
+            return
+        self.active = False
+        self.root.withdraw()
+        self.root.attributes("-fullscreen", False)
+        self.root.overrideredirect(False)
+        if self.normal_geometry:
+            self.root.geometry(self.normal_geometry)
+        self.root.attributes("-topmost", topmost)
+        self.root.deiconify()
+        self.root.state("normal")
+        run_wm_commands(
+            xfce_fullscreen_commands(
+                int(self.root.winfo_id()),
+                int(self.root.winfo_screenwidth()),
+                int(self.root.winfo_screenheight()),
+                enabled=False,
+            ),
+            runner=self.command_runner,
+        )
+        self.root.update_idletasks()
+        self.root.lift()
+        self.root.focus_force()
+
+
+def image_render_size(
+    image_width: int,
+    image_height: int,
+    viewport_width: int,
+    viewport_height: int,
+    zoom_mode: str,
+) -> tuple[int, int]:
+    if (
+        min(image_width, image_height, viewport_width, viewport_height) <= 0
+        or zoom_mode not in ZOOM_MODES
+    ):
+        raise ValueError("invalid render geometry")
+    if zoom_mode == "FIT":
+        scale = min(viewport_width / image_width, viewport_height / image_height)
+    else:
+        scale = 1.0 if zoom_mode == "100%" else 2.0
+    return (
+        max(1, int(round(image_width * scale))),
+        max(1, int(round(image_height * scale))),
+    )
+
+
+def clamp_pan(
+    pan_x: int,
+    pan_y: int,
+    rendered_width: int,
+    rendered_height: int,
+    viewport_width: int,
+    viewport_height: int,
+) -> tuple[int, int]:
+    maximum_x = max(0, (rendered_width - viewport_width) // 2)
+    maximum_y = max(0, (rendered_height - viewport_height) // 2)
+    return (
+        max(-maximum_x, min(maximum_x, pan_x)),
+        max(-maximum_y, min(maximum_y, pan_y)),
+    )
+
+
+def save_screenshot(
+    data: bytes,
+    source: str,
+    *,
+    directory: Path | None = None,
+    captured_at: datetime | None = None,
+) -> Path:
+    """Persist one explicit JPEG with private permissions and no overwrite."""
+
+    if source not in VIEW_SOURCES or not (
+        data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9")
+    ):
+        raise LocalConsoleError("screenshot_unavailable")
+    target_dir = directory or (Path.home() / "Pictures" / "N.O.O.B Screenshots")
+    try:
+        target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target_dir.chmod(0o700)
+    except OSError as exc:
+        raise LocalConsoleError("screenshot_unavailable") from exc
+    stamp = (captured_at or datetime.now()).strftime("%Y%m%d-%H%M%S-%f")
+    prefix = "target" if source == "target" else "environment"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    for suffix in range(100):
+        extra = "" if suffix == 0 else f"-{suffix}"
+        path = target_dir / f"noob-{prefix}-{stamp}{extra}.jpg"
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise LocalConsoleError("screenshot_unavailable") from exc
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            path.chmod(0o600)
+            return path
+        except Exception:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise LocalConsoleError("screenshot_unavailable") from None
+    raise LocalConsoleError("screenshot_unavailable")
+
+
 def view_state_from_status(payload: Any) -> ViewState:
     """Reduce the status response to fields the local UI is allowed to render."""
 
@@ -292,6 +1173,12 @@ def view_state_from_status(payload: Any) -> ViewState:
         )
     ):
         raise LocalConsoleError("status_unavailable")
+    raw_environment = payload.get("environment_camera")
+    environment = (
+        EnvironmentCameraState.unconfigured()
+        if raw_environment is None
+        else environment_camera_from_payload(raw_environment)
+    )
     return ViewState(
         video_ready=video.get("ready") is True,
         serial_ready=serial.get("ready") is True,
@@ -308,6 +1195,7 @@ def view_state_from_status(payload: Any) -> ViewState:
         requested_signal=_signal_from_payload(video.get("requested")),
         negotiated_signal=_signal_from_payload(video.get("negotiated")),
         source_timing_detectable=video.get("source_timing_detectable") is True,
+        environment_camera=environment,
     )
 
 
@@ -440,29 +1328,217 @@ class GatewayClient:
             raise LocalConsoleError("response_too_large")
         return data
 
-    def status(self) -> ViewState:
-        raw = self._request("/api/v1/status", max_bytes=65536)
+    def _json_request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        body: bytes | None = None,
+        max_bytes: int = 65536,
+        timeout: float | None = None,
+        error_code: str = "request_failed",
+    ) -> Any:
+        raw = self._request(
+            path,
+            method=method,
+            body=body,
+            max_bytes=max_bytes,
+            timeout=timeout,
+        )
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            return json.loads(raw.decode("utf-8"))
         except (UnicodeError, ValueError) as exc:
-            raise LocalConsoleError("status_unavailable") from exc
+            raise LocalConsoleError(error_code) from exc
+
+    def status(self) -> ViewState:
+        payload = self._json_request(
+            "/api/v1/status", error_code="status_unavailable"
+        )
         return view_state_from_status(payload)
 
-    def frame(self) -> bytes:
+    def frame(self, source: str = "target") -> bytes:
+        if source not in VIEW_SOURCES:
+            raise LocalConsoleError("frame_invalid")
+        path = (
+            "/api/v1/frame.jpg"
+            if source == "target"
+            else "/api/v1/environment-camera/frame.jpg"
+        )
         raw = self._request(
-            "/api/v1/frame.jpg", max_bytes=MAX_FRAME_RESPONSE_BYTES
+            path, max_bytes=MAX_FRAME_RESPONSE_BYTES
         )
         if not (raw.startswith(b"\xff\xd8") and raw.endswith(b"\xff\xd9")):
             raise LocalConsoleError("frame_invalid")
         return raw
 
     def video_modes(self) -> VideoModeCatalog:
-        raw = self._request("/api/v1/video/modes", max_bytes=65536)
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeError, ValueError) as exc:
-            raise LocalConsoleError("video_modes_unavailable") from exc
+        payload = self._json_request(
+            "/api/v1/video/modes", error_code="video_modes_unavailable"
+        )
         return video_modes_from_payload(payload)
+
+    def set_environment_enabled(
+        self, enabled: bool, expected_generation: int
+    ) -> EnvironmentCameraState:
+        if not isinstance(enabled, bool) or not _is_int(expected_generation) or expected_generation < 0:
+            raise LocalConsoleError("invalid_camera_state_request")
+        body = json.dumps(
+            {"enabled": enabled, "expected_generation": expected_generation},
+            separators=(",", ":"),
+        ).encode("ascii")
+        payload = self._json_request(
+            "/api/v1/environment-camera/state",
+            method="POST",
+            body=body,
+            timeout=CAMERA_ACTION_TIMEOUT,
+            error_code="camera_state_unconfirmed",
+        )
+        return environment_camera_from_response(payload)
+
+    def camera_storage(self, *, limit: int = 20) -> CameraStorageCatalog:
+        if not _is_int(limit) or not 1 <= limit <= MAX_STORAGE_ITEMS:
+            raise LocalConsoleError("camera_storage_unavailable")
+        query = parse.urlencode({"limit": limit})
+        payload = self._json_request(
+            f"/api/v1/environment-camera/storage?{query}",
+            max_bytes=MAX_STORAGE_RESPONSE_BYTES,
+            error_code="camera_storage_unavailable",
+        )
+        return camera_storage_from_payload(payload)
+
+    def camera_snapshot(self, expected_generation: int) -> CameraStorageItem:
+        return self._camera_capture(
+            "/api/v1/environment-camera/snapshot",
+            {"expected_generation": expected_generation},
+        )
+
+    def camera_clip(
+        self,
+        expected_generation: int,
+        *,
+        duration_seconds: int = 10,
+        fps: int = 2,
+    ) -> CameraStorageItem:
+        job_id = self.start_camera_clip(
+            expected_generation,
+            duration_seconds=duration_seconds,
+            fps=fps,
+        )
+
+        deadline = time.monotonic() + duration_seconds + 12.0
+        while time.monotonic() < deadline:
+            job = self.camera_clip_job(job_id)
+            if job.state == "complete":
+                assert job.media_id is not None
+                return self.camera_media(job.media_id)
+            if job.state == "failed":
+                raise LocalConsoleError(job.error_code or "camera_clip_failed")
+            if job.state == "cancelled":
+                raise LocalConsoleError("camera_clip_cancelled")
+            time.sleep(0.4)
+        raise LocalConsoleError("camera_clip_timeout")
+
+    def start_camera_clip(
+        self,
+        expected_generation: int,
+        *,
+        duration_seconds: int = 10,
+        fps: int = 2,
+    ) -> str:
+        if (
+            not _is_int(duration_seconds)
+            or not 1 <= duration_seconds <= 30
+            or not _is_int(fps)
+            or not 1 <= fps <= 5
+            or not _is_int(expected_generation)
+            or expected_generation < 0
+        ):
+            raise LocalConsoleError("invalid_camera_capture_request")
+        body = json.dumps(
+            {
+                "duration_seconds": duration_seconds,
+                "fps": fps,
+                "expected_generation": expected_generation,
+            },
+            separators=(",", ":"),
+        ).encode("ascii")
+        payload = self._json_request(
+            "/api/v1/environment-camera/clip",
+            method="POST",
+            body=body,
+            timeout=CAMERA_ACTION_TIMEOUT,
+            error_code="camera_clip_unconfirmed",
+        )
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise LocalConsoleError("camera_clip_unconfirmed")
+        job_id = payload.get("job_id")
+        if (
+            not isinstance(job_id, str)
+            or JOB_ID.fullmatch(job_id) is None
+            or payload.get("state") != "queued"
+        ):
+            raise LocalConsoleError("camera_clip_unconfirmed")
+        return job_id
+
+    def camera_clip_job(self, job_id: str) -> CameraClipJob:
+        if not isinstance(job_id, str) or JOB_ID.fullmatch(job_id) is None:
+            raise LocalConsoleError("camera_clip_unconfirmed")
+        payload = self._json_request(
+            f"/api/v1/environment-camera/jobs/{job_id}",
+            error_code="camera_clip_unconfirmed",
+        )
+        job = camera_clip_job_from_payload(payload)
+        if job.job_id != job_id:
+            raise LocalConsoleError("camera_clip_unconfirmed")
+        return job
+
+    def stop_camera_clip(self, job_id: str) -> str:
+        if not isinstance(job_id, str) or JOB_ID.fullmatch(job_id) is None:
+            raise LocalConsoleError("camera_clip_unconfirmed")
+        payload = self._json_request(
+            f"/api/v1/environment-camera/jobs/{job_id}/stop",
+            method="POST",
+            body=b"{}",
+            timeout=CAMERA_ACTION_TIMEOUT,
+            error_code="camera_clip_unconfirmed",
+        )
+        if (
+            not isinstance(payload, dict)
+            or payload.get("ok") is not True
+            or payload.get("job_id") != job_id
+            or payload.get("state") not in {"cancelling", "cancelled"}
+        ):
+            raise LocalConsoleError("camera_clip_unconfirmed")
+        return payload["state"]
+
+    def camera_media(self, media_id: str) -> CameraStorageItem:
+        if not isinstance(media_id, str) or MEDIA_ID.fullmatch(media_id) is None:
+            raise LocalConsoleError("camera_storage_unavailable")
+        payload = self._json_request(
+            f"/api/v1/environment-camera/storage/{media_id}",
+            error_code="camera_storage_unavailable",
+        )
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise LocalConsoleError("camera_storage_unavailable")
+        return camera_storage_item_from_payload(payload.get("item"))
+
+    def _camera_capture(
+        self, path: str, body_value: dict[str, Any]
+    ) -> CameraStorageItem:
+        generation = body_value.get("expected_generation")
+        if not _is_int(generation) or generation < 0:
+            raise LocalConsoleError("invalid_camera_capture_request")
+        body = json.dumps(body_value, separators=(",", ":")).encode("ascii")
+        payload = self._json_request(
+            path,
+            method="POST",
+            body=body,
+            timeout=CAMERA_ACTION_TIMEOUT,
+            error_code="camera_capture_unconfirmed",
+        )
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise LocalConsoleError("camera_capture_unconfirmed")
+        return camera_storage_item_from_payload(payload.get("item"))
 
     def set_video_mode(self, mode_id: str, expected_generation: int) -> ViewState:
         if (
@@ -533,17 +1609,36 @@ class NoobLocalConsole:
         self.stop_event = threading.Event()
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=32)
         self.frame_lock = threading.Lock()
-        self.latest_frame: bytes | None = None
+        self.latest_frame: tuple[str, bytes] | None = None
+        self.current_frame_bytes: bytes | None = None
+        self.current_image: Any | None = None
         self.current_state: ViewState | None = None
         self.video_modes: tuple[VideoMode, ...] = ()
         self.mode_display_to_id: dict[str, str] = {}
+        self.storage_catalog = CameraStorageCatalog(
+            CameraStorageState.unavailable(), (), None
+        )
+        self.storage_inflight = False
+        self.active_clip_job_id: str | None = None
+        self.active_clip_job: CameraClipJob | None = None
         self.photo: Any | None = None
+        self.canvas_image_id: int | None = None
+        self.source = "target"
+        self.pan_x = 0
+        self.pan_y = 0
+        self.pan_anchor: tuple[int, int] | None = None
         self.fullscreen = False
         self.pinned = True
         self.action_inflight = False
         self.hide_after_disarm = False
         self.action_gate = ActionGate()
         self.closing = False
+        self.fullscreen_controller = FullscreenController(root)
+        self.fullscreen_verify_attempt = 0
+        try:
+            self.pairing_code, self.ssh_fingerprint = load_local_pairing_identity()
+        except LocalConsoleError:
+            self.pairing_code, self.ssh_fingerprint = "UNAVAILABLE", ""
 
         self._configure_window()
         self._build_ui()
@@ -568,36 +1663,151 @@ class NoobLocalConsole:
         style.map("Arm.TButton", background=[("active", "#195043"), ("disabled", SURFACE)], foreground=[("disabled", "#59656b")])
         style.configure("Disarm.TButton", background="#431d23", foreground="#ffdfe2", bordercolor="#84343e", padding=(18, 10), font=("Sans", 10, "bold"))
         style.map("Disarm.TButton", background=[("active", "#59262e"), ("disabled", SURFACE)], foreground=[("disabled", "#59656b")])
+        style.configure("Exit.TButton", background="#5a2228", foreground="#fff0f1", bordercolor="#b84752", padding=(16, 10), font=("Sans", 10, "bold"))
+        style.map("Exit.TButton", background=[("active", "#793039")])
 
     def _build_ui(self) -> None:
         header = tk.Frame(self.root, bg=BG, padx=18, pady=13)
-        header.pack(fill="x")
+        header.pack(side="top", fill="x")
         brand = tk.Frame(header, bg=BG)
         brand.pack(side="left")
         tk.Label(brand, text="N.O.O.B", bg=BG, fg=TEXT, font=("Sans", 16, "bold")).pack(anchor="w")
         tk.Label(brand, text="NEVER OUT OF BOUNDS · LOCAL CONSOLE", bg=BG, fg=SIGNAL, font=("Sans", 8, "bold")).pack(anchor="w")
+        tk.Label(
+            brand,
+            text=f"PAIRING · {self.pairing_code}",
+            bg=BG,
+            fg=HEALTHY if self.ssh_fingerprint else WARN,
+            font=("Sans", 9, "bold"),
+        ).pack(anchor="w", pady=(3, 0))
 
         self.badges = tk.Frame(header, bg=BG)
         self.badges.pack(side="right")
         self.video_badge = self._badge(self.badges, "VIDEO")
+        self.camera_badge = self._badge(self.badges, "CAMERA")
         self.hid_badge = self._badge(self.badges, "HID")
         self.control_badge = self._badge(self.badges, "CONTROL")
 
-        stage = tk.Frame(self.root, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
-        stage.pack(fill="both", expand=True, padx=16)
-        self.image_label = tk.Label(
-            stage,
-            text="Waiting for a fresh HDMI frame…",
-            bg="#020405",
-            fg=MUTED,
-            font=("Sans", 12),
+        source_strip = tk.Frame(
+            self.root, bg=SURFACE_RAISED, padx=16, pady=7
         )
-        self.image_label.pack(fill="both", expand=True, padx=8, pady=8)
-
-        mode_strip = tk.Frame(self.root, bg=SURFACE_RAISED, padx=16, pady=8)
-        mode_strip.pack(fill="x", padx=16, pady=(8, 0))
+        source_strip.pack(side="top", fill="x", padx=16, pady=(0, 8))
         tk.Label(
-            mode_strip,
+            source_strip,
+            text="VIEW",
+            bg=SURFACE_RAISED,
+            fg=TEXT,
+            font=("Sans", 9, "bold"),
+        ).pack(side="left")
+        self.source_var = tk.StringVar(self.root, value="target")
+        self.target_source_button = ttk.Radiobutton(
+            source_strip,
+            text="TARGET HDMI",
+            value="target",
+            variable=self.source_var,
+            command=lambda: self._choose_source("target"),
+        )
+        self.target_source_button.pack(side="left", padx=(10, 4))
+        self.environment_source_button = ttk.Radiobutton(
+            source_strip,
+            text="ENVIRONMENT CAMERA",
+            value="environment",
+            variable=self.source_var,
+            command=lambda: self._choose_source("environment"),
+            state="disabled",
+        )
+        self.environment_source_button.pack(side="left", padx=4)
+        self.screenshot_button = ttk.Button(
+            source_strip,
+            text="SCREENSHOT",
+            style="Noob.TButton",
+            command=self._screenshot,
+        )
+        self.screenshot_button.pack(side="right")
+        self.zoom_var = tk.StringVar(self.root, value="FIT")
+        self.zoom_box = ttk.Combobox(
+            source_strip,
+            textvariable=self.zoom_var,
+            values=ZOOM_MODES,
+            state="readonly",
+            width=7,
+            font=("Sans", 9),
+        )
+        self.zoom_box.pack(side="right", padx=(8, 10))
+        self.zoom_box.bind("<<ComboboxSelected>>", self._change_zoom)
+        tk.Label(
+            source_strip,
+            text="ZOOM",
+            bg=SURFACE_RAISED,
+            fg=MUTED,
+            font=("Sans", 9, "bold"),
+        ).pack(side="right")
+
+        footer = tk.Frame(self.root, bg=SURFACE_RAISED, padx=16, pady=8)
+        footer.pack(side="bottom", fill="x")
+        self.message = tk.Label(
+            footer,
+            text="Connecting to the local gateway…",
+            bg=SURFACE_RAISED,
+            fg=MUTED,
+            font=("Sans", 10),
+        )
+        self.message.pack(side="left")
+        tk.Label(
+            footer,
+            text="Ctrl+Alt+Esc releases target input · Escape exits full screen · Super+N toggles the console",
+            bg=SURFACE_RAISED,
+            fg=MUTED,
+            font=("Sans", 9, "bold"),
+        ).pack(side="right")
+
+        controls = tk.Frame(self.root, bg=BG, padx=16, pady=10)
+        controls.pack(side="bottom", fill="x")
+        self.arm_button = ttk.Button(
+            controls,
+            text="ARM TARGET CONTROL",
+            style="Arm.TButton",
+            command=self._arm,
+        )
+        self.arm_button.pack(side="left")
+        self.disarm_button = ttk.Button(
+            controls,
+            text="DISARM",
+            style="Disarm.TButton",
+            command=self._disarm,
+        )
+        self.disarm_button.pack(side="left", padx=(8, 0))
+        self.desktop_button = ttk.Button(
+            controls,
+            text="DESKTOP",
+            style="Noob.TButton",
+            command=self._return_to_desktop,
+        )
+        self.desktop_button.pack(side="left", padx=(8, 0))
+        self.fullscreen_button = ttk.Button(
+            controls,
+            text="FULL SCREEN",
+            style="Noob.TButton",
+            command=self._toggle_fullscreen,
+        )
+        self.fullscreen_button.pack(side="right")
+        self.pin_button = ttk.Button(
+            controls,
+            text="UNPIN",
+            style="Noob.TButton",
+            command=self._toggle_pin,
+        )
+        self.pin_button.pack(side="right", padx=(0, 8))
+
+        self.settings_host = tk.Frame(self.root, bg=BG)
+        self.settings_host.pack(side="bottom", fill="x", padx=16, pady=(8, 0))
+
+        self.target_settings = tk.Frame(
+            self.settings_host, bg=SURFACE_RAISED, padx=16, pady=8
+        )
+        self.target_settings.pack(fill="x")
+        tk.Label(
+            self.target_settings,
             text="CAPTURE OUTPUT",
             bg=SURFACE_RAISED,
             fg=TEXT,
@@ -605,7 +1815,7 @@ class NoobLocalConsole:
         ).pack(side="left")
         self.mode_var = tk.StringVar(self.root)
         self.mode_box = ttk.Combobox(
-            mode_strip,
+            self.target_settings,
             textvariable=self.mode_var,
             state="disabled",
             width=34,
@@ -614,7 +1824,7 @@ class NoobLocalConsole:
         self.mode_box.pack(side="left", padx=(10, 12))
         self.mode_box.bind("<<ComboboxSelected>>", self._select_video_mode)
         self.mode_detail = tk.Label(
-            mode_strip,
+            self.target_settings,
             text="Validated profiles load from the gateway · target timing is selected manually",
             bg=SURFACE_RAISED,
             fg=MUTED,
@@ -622,30 +1832,101 @@ class NoobLocalConsole:
         )
         self.mode_detail.pack(side="left")
 
-        controls = tk.Frame(self.root, bg=BG, padx=16, pady=12)
-        controls.pack(fill="x")
-        self.arm_button = ttk.Button(controls, text="ARM TARGET CONTROL", style="Arm.TButton", command=self._arm)
-        self.arm_button.pack(side="left")
-        self.disarm_button = ttk.Button(controls, text="DISARM", style="Disarm.TButton", command=self._disarm)
-        self.disarm_button.pack(side="left", padx=(8, 0))
-        self.desktop_button = ttk.Button(controls, text="RETURN TO DESKTOP", style="Noob.TButton", command=self._return_to_desktop)
-        self.desktop_button.pack(side="left", padx=(8, 0))
-        self.fullscreen_button = ttk.Button(controls, text="FULL SCREEN", style="Noob.TButton", command=self._toggle_fullscreen)
-        self.fullscreen_button.pack(side="right")
-        self.pin_button = ttk.Button(controls, text="UNPIN", style="Noob.TButton", command=self._toggle_pin)
-        self.pin_button.pack(side="right", padx=(0, 8))
-
-        footer = tk.Frame(self.root, bg=SURFACE_RAISED, padx=16, pady=8)
-        footer.pack(fill="x")
-        self.message = tk.Label(footer, text="Connecting to the local gateway…", bg=SURFACE_RAISED, fg=MUTED, font=("Sans", 10))
-        self.message.pack(side="left")
+        self.environment_settings = tk.Frame(
+            self.settings_host, bg=SURFACE_RAISED, padx=16, pady=8
+        )
+        camera_row = tk.Frame(self.environment_settings, bg=SURFACE_RAISED)
+        camera_row.pack(fill="x")
         tk.Label(
-            footer,
-            text="Ctrl+Alt+Esc returns input locally · Super+N safely closes or opens this console",
+            camera_row,
+            text="ENVIRONMENT CAMERA",
+            bg=SURFACE_RAISED,
+            fg=TEXT,
+            font=("Sans", 9, "bold"),
+        ).pack(side="left")
+        self.camera_toggle_button = ttk.Button(
+            camera_row,
+            text="ENABLE SENSOR",
+            style="Noob.TButton",
+            command=self._toggle_environment_camera,
+        )
+        self.camera_toggle_button.pack(side="left", padx=(10, 8))
+        self.camera_snapshot_button = ttk.Button(
+            camera_row,
+            text="SNAPSHOT TO SD",
+            style="Noob.TButton",
+            command=self._camera_snapshot,
+        )
+        self.camera_snapshot_button.pack(side="left", padx=4)
+        self.camera_clip_button = ttk.Button(
+            camera_row,
+            text="10S CLIP TO SD",
+            style="Noob.TButton",
+            command=self._camera_clip,
+        )
+        self.camera_clip_button.pack(side="left", padx=4)
+        self.storage_refresh_button = ttk.Button(
+            camera_row,
+            text="REFRESH SD",
+            style="Noob.TButton",
+            command=self._refresh_storage,
+        )
+        self.storage_refresh_button.pack(side="right")
+        self.camera_detail = tk.Label(
+            self.environment_settings,
+            text="Logical sensor control · USB power remains on",
             bg=SURFACE_RAISED,
             fg=MUTED,
             font=("Sans", 9),
-        ).pack(side="right")
+        )
+        self.camera_detail.pack(anchor="w", pady=(6, 3))
+        self.storage_detail = tk.Label(
+            self.environment_settings,
+            text="microSD storage unavailable",
+            bg=SURFACE_RAISED,
+            fg=MUTED,
+            font=("Sans", 9),
+        )
+        self.storage_detail.pack(anchor="w")
+        self.storage_list = tk.Listbox(
+            self.environment_settings,
+            height=3,
+            bg="#091015",
+            fg=TEXT,
+            selectbackground="#174743",
+            selectforeground=TEXT,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+            borderwidth=0,
+            font=("Sans", 9),
+        )
+        self.storage_list.pack(fill="x", pady=(5, 0))
+
+        stage = tk.Frame(
+            self.root,
+            bg=SURFACE,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        stage.pack(side="top", fill="both", expand=True, padx=16)
+        self.image_canvas = tk.Canvas(
+            stage,
+            bg="#020405",
+            highlightthickness=0,
+            cursor="fleur",
+        )
+        self.image_canvas.pack(fill="both", expand=True, padx=8, pady=8)
+        self.canvas_message_id = self.image_canvas.create_text(
+            550,
+            260,
+            text="Waiting for a fresh target HDMI frame…",
+            fill=MUTED,
+            font=("Sans", 12),
+        )
+        self.image_canvas.bind("<Configure>", lambda _event: self._render_current_frame())
+        self.image_canvas.bind("<ButtonPress-1>", self._pan_start)
+        self.image_canvas.bind("<B1-Motion>", self._pan_move)
+        self.image_canvas.bind("<ButtonRelease-1>", lambda _event: self._pan_end())
         self._set_buttons()
 
     def _badge(self, parent: tk.Widget, label: str) -> tuple[tk.Label, tk.Label]:
@@ -666,7 +1947,25 @@ class NoobLocalConsole:
             with self.frame_lock:
                 self.latest_frame = event[1]
             return
-        if event[0] in {"action", "action_error", "mode_action", "mode_action_error"}:
+        if event[0] in {
+            "action",
+            "action_error",
+            "mode_action",
+            "mode_action_error",
+            "source_action",
+            "source_action_error",
+            "camera_action",
+            "camera_action_error",
+            "capture_action",
+            "capture_action_error",
+            "clip_started",
+            "clip_start_error",
+            "clip_stop",
+            "clip_stop_error",
+            "clip_job",
+            "screenshot",
+            "screenshot_error",
+        }:
             while not self.stop_event.is_set():
                 try:
                     self.events.put(event, timeout=0.1)
@@ -685,6 +1984,8 @@ class NoobLocalConsole:
     def _poll_loop(self) -> None:
         next_status = 0.0
         next_modes = 0.0
+        next_storage = 0.0
+        next_clip_job = 0.0
         while not self.stop_event.is_set():
             now = time.monotonic()
             if now >= next_status:
@@ -699,10 +2000,38 @@ class NoobLocalConsole:
                 except LocalConsoleError as exc:
                     self._offer(("error", exc.code))
                 next_modes = now + 5.0
+            if self.source == "environment" and now >= next_storage:
+                try:
+                    self._offer(("storage", self.client.camera_storage(limit=20)))
+                except LocalConsoleError as exc:
+                    if exc.code not in {
+                        "camera_not_configured",
+                        "camera_unavailable",
+                        "camera_storage_unavailable",
+                    }:
+                        self._offer(("error", exc.code))
+                next_storage = now + 5.0
+            active_clip_job_id = self.active_clip_job_id
+            if active_clip_job_id is not None and now >= next_clip_job:
+                try:
+                    self._offer(
+                        ("clip_job", self.client.camera_clip_job(active_clip_job_id))
+                    )
+                except LocalConsoleError as exc:
+                    self._offer(("clip_job_error", exc.code))
+                next_clip_job = now + 0.4
+            source = self.source
             try:
-                self._offer(("frame", self.client.frame()))
+                self._offer(("frame", (source, self.client.frame(source))))
             except LocalConsoleError as exc:
-                if exc.code not in {"video_unavailable", "gateway_unavailable"}:
+                if exc.code not in {
+                    "video_unavailable",
+                    "gateway_unavailable",
+                    "camera_not_configured",
+                    "camera_unavailable",
+                    "camera_stream_disabled",
+                    "environment_camera_unavailable",
+                }:
                     self._offer(("error", exc.code))
             self.stop_event.wait(self.FRAME_INTERVAL)
 
@@ -721,6 +2050,7 @@ class NoobLocalConsole:
                     self._apply_status(payload)
                     if self.hide_after_disarm:
                         self.hide_after_disarm = False
+                        self._leave_fullscreen()
                         self.root.iconify()
                 elif kind == "action_error":
                     self.action_inflight = False
@@ -736,6 +2066,129 @@ class NoobLocalConsole:
                 elif kind == "mode_action_error":
                     self.action_inflight = False
                     self._show_error(payload)
+                elif kind == "source_action":
+                    self.action_inflight = False
+                    state, source = payload
+                    self._apply_status(state)
+                    self._apply_source(source)
+                elif kind == "source_action_error":
+                    self.action_inflight = False
+                    self.source_var.set(self.source)
+                    self._show_error(payload)
+                elif kind == "camera_action":
+                    self.action_inflight = False
+                    self._apply_environment_state(payload)
+                    state_text = "enabled" if payload.sensor_enabled else "disabled"
+                    self.message.configure(
+                        text=(
+                            f"Environment camera sensor and stream {state_text}. "
+                            "USB power remains on."
+                        ),
+                        fg=HEALTHY if payload.sensor_enabled else MUTED,
+                    )
+                elif kind == "camera_action_error":
+                    self.action_inflight = False
+                    self._show_error(payload)
+                elif kind == "capture_action":
+                    self.action_inflight = False
+                    item = payload
+                    self.message.configure(
+                        text=(
+                            f"Saved {item.kind} to camera microSD: "
+                            f"{item.created_at or item.item_id}"
+                        ),
+                        fg=HEALTHY,
+                    )
+                    self._refresh_storage()
+                elif kind == "capture_action_error":
+                    self.action_inflight = False
+                    self._show_error(payload)
+                elif kind == "clip_started":
+                    self.action_inflight = False
+                    self.active_clip_job_id = payload
+                    self.active_clip_job = None
+                    self.message.configure(
+                        text="Camera clip started · use STOP CLIP to cancel the unpublished partial.",
+                        fg=SIGNAL,
+                    )
+                elif kind == "clip_start_error":
+                    self.action_inflight = False
+                    self._show_error(payload)
+                elif kind == "clip_stop":
+                    self.action_inflight = False
+                    if payload == "cancelled":
+                        self.active_clip_job_id = None
+                        self.active_clip_job = None
+                        self.message.configure(
+                            text="Camera clip cancelled; no partial clip was published.",
+                            fg=MUTED,
+                        )
+                        self._refresh_storage()
+                    else:
+                        if self.active_clip_job is not None:
+                            self.active_clip_job = replace(
+                                self.active_clip_job, state="cancelling"
+                            )
+                        self.message.configure(
+                            text="Camera clip cancellation requested; waiting for cancelled status…",
+                            fg=WARN,
+                        )
+                elif kind == "clip_stop_error":
+                    self.action_inflight = False
+                    self._show_error(payload)
+                elif kind == "clip_job":
+                    if self.active_clip_job_id != payload.job_id:
+                        continue
+                    self.active_clip_job = payload
+                    if payload.state == "complete":
+                        self.active_clip_job_id = None
+                        self.active_clip_job = None
+                        self.message.configure(
+                            text=f"Camera clip stored on microSD: {payload.media_id}",
+                            fg=HEALTHY,
+                        )
+                        self._refresh_storage()
+                    elif payload.state == "failed":
+                        self.active_clip_job_id = None
+                        self.active_clip_job = None
+                        self._show_error(payload.error_code or "camera_clip_failed")
+                    elif payload.state == "cancelled":
+                        self.active_clip_job_id = None
+                        self.active_clip_job = None
+                        self.message.configure(
+                            text="Camera clip cancelled; no partial clip was published.",
+                            fg=MUTED,
+                        )
+                        self._refresh_storage()
+                    elif payload.state == "cancelling":
+                        self.message.configure(
+                            text="Camera clip cancellation is in progress…",
+                            fg=WARN,
+                        )
+                    else:
+                        self.message.configure(
+                            text=(
+                                f"Camera clip {payload.state} · "
+                                f"{payload.frames_written}/{payload.frames_target} frames · "
+                                "STOP CLIP cancels the unpublished partial."
+                            ),
+                            fg=SIGNAL,
+                        )
+                elif kind == "clip_job_error":
+                    self._show_error(payload)
+                elif kind == "storage":
+                    self._apply_storage(payload)
+                elif kind == "storage_error":
+                    self.storage_inflight = False
+                    self._show_error(payload)
+                elif kind == "screenshot":
+                    self.action_inflight = False
+                    self.message.configure(
+                        text=f"Private screenshot saved: {payload}", fg=HEALTHY
+                    )
+                elif kind == "screenshot_error":
+                    self.action_inflight = False
+                    self._show_error(payload)
                 elif kind == "error":
                     self._show_error(payload)
         except queue.Empty:
@@ -743,49 +2196,267 @@ class NoobLocalConsole:
         with self.frame_lock:
             latest_frame, self.latest_frame = self.latest_frame, None
         if latest_frame is not None:
-            self._apply_frame(latest_frame)
+            source, data = latest_frame
+            if source == self.source:
+                self._apply_frame(source, data)
         self._set_buttons()
         self.root.after(40, self._drain_events)
 
-    def _apply_frame(self, data: bytes) -> None:
+    def _apply_frame(self, source_name: str, data: bytes) -> None:
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(data)) as image:
+                image.load()
+                frame = image.convert("RGB")
+            self.current_frame_bytes = data
+            self.current_image = frame
+            self._render_current_frame()
+        except Exception:
+            self._show_error("frame_invalid")
+
+    def _render_current_frame(self) -> None:
+        image = self.current_image
+        if image is None:
+            self.image_canvas.itemconfigure(
+                self.canvas_message_id,
+                text=(
+                    "Waiting for a fresh target HDMI frame…"
+                    if self.source == "target"
+                    else "Environment camera view is not producing a fresh frame."
+                ),
+                state="normal",
+            )
+            self.image_canvas.coords(
+                self.canvas_message_id,
+                max(1, self.image_canvas.winfo_width()) // 2,
+                max(1, self.image_canvas.winfo_height()) // 2,
+            )
+            if self.canvas_image_id is not None:
+                self.image_canvas.delete(self.canvas_image_id)
+                self.canvas_image_id = None
+            return
         try:
             from PIL import Image, ImageTk
 
-            with Image.open(BytesIO(data)) as source:
-                source.load()
-                frame = source.convert("RGB")
-            width = max(320, self.image_label.winfo_width() - 4)
-            height = max(180, self.image_label.winfo_height() - 4)
-            frame.thumbnail((width, height), Image.Resampling.BILINEAR)
-            canvas = Image.new("RGB", (width, height), "#020405")
-            canvas.paste(frame, ((width - frame.width) // 2, (height - frame.height) // 2))
-            self.photo = ImageTk.PhotoImage(canvas)
-            self.image_label.configure(image=self.photo, text="")
+            viewport_width = max(1, self.image_canvas.winfo_width())
+            viewport_height = max(1, self.image_canvas.winfo_height())
+            rendered_width, rendered_height = image_render_size(
+                image.width,
+                image.height,
+                viewport_width,
+                viewport_height,
+                self.zoom_var.get(),
+            )
+            self.pan_x, self.pan_y = clamp_pan(
+                self.pan_x,
+                self.pan_y,
+                rendered_width,
+                rendered_height,
+                viewport_width,
+                viewport_height,
+            )
+            scale = rendered_width / image.width
+            # Render only the visible viewport.  At 200% this avoids allocating
+            # a transient full 5120x3200 bitmap for each 2560x1600 frame.
+            inverse_scale = 1.0 / scale
+            center_x = viewport_width / 2 + self.pan_x
+            center_y = viewport_height / 2 + self.pan_y
+            affine = (
+                inverse_scale,
+                0,
+                image.width / 2 - center_x * inverse_scale,
+                0,
+                inverse_scale,
+                image.height / 2 - center_y * inverse_scale,
+            )
+            rendered = image.transform(
+                (viewport_width, viewport_height),
+                Image.Transform.AFFINE,
+                affine,
+                resample=Image.Resampling.BILINEAR,
+                fillcolor="#020405",
+            )
+            self.photo = ImageTk.PhotoImage(rendered)
+            if self.canvas_image_id is None:
+                self.canvas_image_id = self.image_canvas.create_image(
+                    0, 0, anchor="nw", image=self.photo
+                )
+            else:
+                self.image_canvas.itemconfigure(
+                    self.canvas_image_id, image=self.photo
+                )
+                self.image_canvas.coords(self.canvas_image_id, 0, 0)
+            self.image_canvas.itemconfigure(
+                self.canvas_message_id, state="hidden"
+            )
+            pannable = (
+                rendered_width > viewport_width
+                or rendered_height > viewport_height
+            )
+            self.image_canvas.configure(cursor="fleur" if pannable else "arrow")
         except Exception:
             self._show_error("frame_invalid")
+
+    def _change_zoom(self, _event: Any = None) -> None:
+        if self.zoom_var.get() not in ZOOM_MODES:
+            self.zoom_var.set("FIT")
+        self.pan_x = 0
+        self.pan_y = 0
+        self._render_current_frame()
+
+    def _pan_start(self, event: Any) -> None:
+        self.pan_anchor = (int(event.x), int(event.y))
+
+    def _pan_move(self, event: Any) -> None:
+        if self.pan_anchor is None:
+            return
+        x = int(event.x)
+        y = int(event.y)
+        self.pan_x += x - self.pan_anchor[0]
+        self.pan_y += y - self.pan_anchor[1]
+        self.pan_anchor = (x, y)
+        self._render_current_frame()
+
+    def _pan_end(self) -> None:
+        self.pan_anchor = None
 
     def _apply_status(self, state: ViewState) -> None:
         self.current_state = state
         self._set_badge(self.video_badge, "VIDEO", "LIVE" if state.video_ready else "WAITING", HEALTHY if state.video_ready else WARN)
+        self._apply_environment_state(state.environment_camera, update_state=False)
         hid_ready = state.serial_ready and state.keyboard_ready and state.pointer_ready
         self._set_badge(self.hid_badge, "HID", "READY" if hid_ready else "WAITING", HEALTHY if hid_ready else WARN)
         if state.local_armed and state.exclusive_grab:
             self._set_badge(self.control_badge, "CONTROL", "LOCAL", SIGNAL)
-            self.message.configure(text="Target control is armed. Ctrl+Alt+Esc returns the keyboard and trackball to the uConsole.", fg=SIGNAL)
+            if self.source == "target":
+                self.message.configure(text="Target control is armed. Ctrl+Alt+Esc returns the keyboard and trackball to the uConsole.", fg=SIGNAL)
         elif state.remote_control_active:
             self._set_badge(self.control_badge, "CONTROL", "REMOTE", SIGNAL)
-            self.message.configure(text="A remote operator owns input. Local video remains live and read-only.", fg=MUTED)
+            if self.source == "target":
+                self.message.configure(text="A remote operator owns input. Local video remains live and read-only.", fg=MUTED)
         elif state.release_required:
             self._set_badge(self.control_badge, "CONTROL", "RECOVERY", DANGER)
-            self.message.configure(text="Input release is not yet confirmed. Local arming is blocked.", fg=DANGER)
+            if self.source == "target":
+                self.message.configure(text="Input release is not yet confirmed. Local arming is blocked.", fg=DANGER)
         elif state.arm_allowed:
             self._set_badge(self.control_badge, "CONTROL", "AVAILABLE", HEALTHY)
-            self.message.configure(text="Video is live. Arm target control when you are ready to leave the uConsole desktop.", fg=MUTED)
+            if self.source == "target":
+                self.message.configure(text="Video is live. Arm target control when you are ready to leave the uConsole desktop.", fg=MUTED)
         else:
             self._set_badge(self.control_badge, "CONTROL", "UNAVAILABLE", WARN)
-            self.message.configure(text="Waiting for the video, UART, keyboard, and trackball proof layers.", fg=WARN)
+            if self.source == "target":
+                self.message.configure(text="Waiting for the video, UART, keyboard, and trackball proof layers.", fg=WARN)
+        if self.source == "environment":
+            camera = state.environment_camera
+            if not camera.sensor_enabled:
+                self.message.configure(
+                    text="Environment camera view is logically off. USB power remains on.",
+                    fg=MUTED,
+                )
+            elif camera.frame_ready:
+                self.message.configure(
+                    text="Environment camera is live. Target input remains safely disarmed.",
+                    fg=HEALTHY,
+                )
+            else:
+                self.message.configure(
+                    text="Environment camera is enabled but waiting for a fresh frame.",
+                    fg=WARN,
+                )
         self._sync_mode_selection(state.active_mode_id)
         self._update_mode_detail(state)
+
+    def _apply_environment_state(
+        self,
+        camera: EnvironmentCameraState,
+        *,
+        update_state: bool = True,
+    ) -> None:
+        if (
+            self.active_clip_job_id is None
+            and camera.storage.active_job_id is not None
+        ):
+            self.active_clip_job_id = camera.storage.active_job_id
+            self.active_clip_job = None
+        if update_state and self.current_state is not None:
+            self.current_state = replace(
+                self.current_state, environment_camera=camera
+            )
+        if (
+            self.source == "environment"
+            and (not camera.sensor_enabled or not camera.stream_enabled)
+        ):
+            self.current_frame_bytes = None
+            self.current_image = None
+            self.photo = None
+            self._render_current_frame()
+        if not camera.configured:
+            self._set_badge(self.camera_badge, "CAMERA", "NOT SET", MUTED)
+            self.camera_detail.configure(
+                text="No environment camera is configured on this appliance",
+                fg=MUTED,
+            )
+            if self.source == "environment":
+                self._apply_source("target")
+            return
+        if not camera.reachable:
+            self._set_badge(self.camera_badge, "CAMERA", "UNREACHABLE", DANGER)
+        elif not camera.sensor_enabled or not camera.stream_enabled:
+            self._set_badge(self.camera_badge, "CAMERA", "LOGICAL OFF", MUTED)
+        elif camera.frame_ready:
+            self._set_badge(self.camera_badge, "CAMERA", "LIVE", HEALTHY)
+        else:
+            self._set_badge(self.camera_badge, "CAMERA", "WAITING", WARN)
+        age = (
+            "—"
+            if camera.last_frame_age_ms is None
+            else f"{camera.last_frame_age_ms} ms"
+        )
+        self.camera_detail.configure(
+            text=(
+                f"Logical sensor/stream control · USB power remains on · "
+                f"frame age {age} · {camera.viewers} viewer(s)"
+            ),
+            fg=MUTED if camera.reachable else DANGER,
+        )
+        storage = camera.storage
+        if storage.available:
+            self.storage_detail.configure(
+                text=(
+                    f"microSD {storage.state} · "
+                    f"{format_byte_count(storage.free_bytes)} free of "
+                    f"{format_byte_count(storage.total_bytes)} · "
+                    f"{storage.media_count} item(s) · "
+                    f"{'writable' if storage.writable else 'read only'}"
+                ),
+                fg=MUTED if storage.writable else WARN,
+            )
+        else:
+            self.storage_detail.configure(
+                text="microSD storage unavailable", fg=WARN
+            )
+
+    def _apply_storage(self, catalog: CameraStorageCatalog) -> None:
+        self.storage_catalog = catalog
+        self.storage_inflight = False
+        if self.current_state is not None:
+            camera = replace(
+                self.current_state.environment_camera,
+                storage=catalog.storage,
+            )
+            self.current_state = replace(
+                self.current_state, environment_camera=camera
+            )
+            self._apply_environment_state(camera, update_state=False)
+        self.storage_list.delete(0, "end")
+        if not catalog.items:
+            self.storage_list.insert("end", "No snapshots or clips reported")
+        else:
+            for item in catalog.items:
+                self.storage_list.insert("end", item.display_label)
+        if catalog.next_cursor is not None:
+            self.storage_list.insert("end", "More items are available in storage")
 
     def _apply_modes(self, catalog: VideoModeCatalog) -> None:
         self.video_modes = catalog.modes
@@ -853,6 +2524,22 @@ class NoobLocalConsole:
             "video_mode_timeout": "The new capture output did not become ready before rollback.",
             "video_mode_rollback_failed": "Capture rollback also failed; choose the safe profile when the device returns.",
             "video_capture_failed": "The selected capture output failed; the gateway attempted rollback.",
+            "camera_not_configured": "No environment camera is configured on this appliance.",
+            "camera_unavailable": "The environment camera is not reachable.",
+            "environment_camera_unavailable": "The environment camera is not reachable.",
+            "camera_stream_disabled": "The environment camera view is logically off; USB power remains on.",
+            "camera_status_unavailable": "Environment-camera status is unavailable.",
+            "camera_state_unconfirmed": "The camera state change was not confirmed; authoritative status will refresh.",
+            "invalid_camera_state_request": "The environment-camera state request was rejected locally.",
+            "camera_storage_unavailable": "Camera microSD storage is unavailable.",
+            "camera_capture_unconfirmed": "The camera did not confirm the microSD capture.",
+            "camera_clip_unconfirmed": "The camera clip job could not be confirmed; it was not replayed.",
+            "camera_clip_failed": "The camera reported that the bounded clip job failed.",
+            "camera_clip_cancelled": "The camera clip was cancelled; no partial clip was published.",
+            "camera_clip_timeout": "The camera clip job did not reach a terminal state before the local timeout.",
+            "invalid_camera_capture_request": "The microSD capture request was rejected locally.",
+            "screenshot_unavailable": "A private screenshot could not be saved.",
+            "fullscreen_unconfirmed": "Full screen could not be verified edge to edge. Use DESKTOP or Escape and retry.",
             "operation_in_progress": "Wait for the current arm, disarm, or capture-output action to finish before closing.",
         }
         self.message.configure(text=messages.get(code, "The requested local-console action failed safely."), fg=DANGER)
@@ -860,17 +2547,91 @@ class NoobLocalConsole:
     def _set_buttons(self) -> None:
         state = self.current_state
         armed = bool(state and state.local_armed)
-        self.arm_button.configure(state="normal" if state and state.arm_allowed and not self.action_inflight else "disabled")
+        target_active = self.source == "target"
+        self.arm_button.configure(state="normal" if state and target_active and state.arm_allowed and not self.action_inflight else "disabled")
         self.disarm_button.configure(state="normal" if armed and not self.action_inflight else "disabled")
         self.desktop_button.configure(state="disabled" if self.action_inflight else "normal")
+        camera = state.environment_camera if state else EnvironmentCameraState.unconfigured()
+        source_enabled = not self.action_inflight and not self.closing
+        self.target_source_button.configure(
+            state="normal" if source_enabled else "disabled"
+        )
+        self.environment_source_button.configure(
+            state=(
+                "normal"
+                if source_enabled and camera.configured
+                else "disabled"
+            )
+        )
+        self.screenshot_button.configure(
+            state=(
+                "normal"
+                if self.current_frame_bytes is not None
+                and not self.action_inflight
+                and not self.closing
+                else "disabled"
+            )
+        )
         mode_enabled = bool(
             state
+            and target_active
             and state.mode_change_allowed
             and self.video_modes
             and not self.action_inflight
             and not self.closing
         )
         self.mode_box.configure(state="readonly" if mode_enabled else "disabled")
+        camera_controls = bool(
+            self.source == "environment"
+            and camera.configured
+            and camera.reachable
+            and not self.action_inflight
+            and not self.closing
+        )
+        self.camera_toggle_button.configure(
+            text=(
+                "TURN CAMERA VIEW OFF"
+                if camera.sensor_enabled and camera.stream_enabled
+                else "TURN CAMERA VIEW ON"
+            ),
+            state="normal" if camera_controls else "disabled",
+        )
+        clip_active = self.active_clip_job_id is not None
+        capture_enabled = bool(
+            camera_controls
+            and camera.sensor_enabled
+            and camera.stream_enabled
+            and camera.storage.writable
+            and not clip_active
+        )
+        capture_state = "normal" if capture_enabled else "disabled"
+        self.camera_snapshot_button.configure(state=capture_state)
+        if clip_active:
+            stopping = (
+                self.active_clip_job is not None
+                and self.active_clip_job.state == "cancelling"
+            )
+            self.camera_clip_button.configure(
+                text="STOPPING…" if stopping else "STOP CLIP",
+                state=(
+                    "normal"
+                    if camera_controls and not stopping
+                    else "disabled"
+                ),
+            )
+        else:
+            self.camera_clip_button.configure(
+                text="10S CLIP TO SD", state=capture_state
+            )
+        self.storage_refresh_button.configure(
+            state=(
+                "normal"
+                if camera_controls
+                and camera.storage.available
+                and not self.storage_inflight
+                else "disabled"
+            )
+        )
 
     def _action(self, name: str) -> None:
         if self.action_inflight or self.closing:
@@ -890,10 +2651,272 @@ class NoobLocalConsole:
         threading.Thread(target=run, daemon=True, name=f"noob-local-{name}").start()
 
     def _arm(self) -> None:
-        self._action("arm")
+        if self.source == "target":
+            self._action("arm")
 
     def _disarm(self) -> None:
         self._action("disarm")
+
+    def _choose_source(self, desired: str) -> None:
+        self.source_var.set(self.source)
+        if (
+            desired not in VIEW_SOURCES
+            or desired == self.source
+            or self.action_inflight
+            or self.closing
+        ):
+            return
+        if desired == "environment":
+            state = self.current_state
+            if state is None or not state.environment_camera.configured:
+                self._show_error("camera_not_configured")
+                return
+            # Leaving the target view is an authenticated release boundary,
+            # even when the last status sample said local input was unarmed.
+            self.action_inflight = True
+            self._set_buttons()
+
+            def run() -> None:
+                try:
+                    result = self.action_gate.run(self.client.disarm)
+                    if result is not None:
+                        self._offer(("source_action", (result, desired)))
+                except LocalConsoleError as exc:
+                    self._offer(("source_action_error", exc.code))
+
+            threading.Thread(
+                target=run,
+                daemon=True,
+                name="noob-local-source-release",
+            ).start()
+            return
+        self._apply_source("target")
+
+    def _apply_source(self, source_name: str) -> None:
+        if source_name not in VIEW_SOURCES:
+            return
+        self.source = source_name
+        self.source_var.set(source_name)
+        self.current_frame_bytes = None
+        self.current_image = None
+        self.photo = None
+        self.pan_x = 0
+        self.pan_y = 0
+        if source_name == "target":
+            self.environment_settings.pack_forget()
+            self.target_settings.pack(fill="x")
+        else:
+            self.target_settings.pack_forget()
+            self.environment_settings.pack(fill="x")
+            self._refresh_storage()
+        self._render_current_frame()
+        self._set_buttons()
+
+    def _toggle_environment_camera(self) -> None:
+        state = self.current_state
+        if (
+            state is None
+            or self.source != "environment"
+            or not state.environment_camera.configured
+            or self.action_inflight
+            or self.closing
+        ):
+            return
+        camera = state.environment_camera
+        enabled = not (camera.sensor_enabled and camera.stream_enabled)
+        self.action_inflight = True
+        self._set_buttons()
+
+        def run() -> None:
+            try:
+                result = self.action_gate.run(
+                    lambda: self.client.set_environment_enabled(
+                        enabled, camera.generation
+                    )
+                )
+                if result is not None:
+                    self._offer(("camera_action", result))
+            except LocalConsoleError as exc:
+                self._offer(("camera_action_error", exc.code))
+
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="noob-local-camera-state",
+        ).start()
+
+    def _camera_snapshot(self) -> None:
+        self._camera_capture("snapshot")
+
+    def _camera_clip(self) -> None:
+        if self.active_clip_job_id is None:
+            self._start_camera_clip()
+        else:
+            self._stop_camera_clip()
+
+    def _start_camera_clip(self) -> None:
+        state = self.current_state
+        if (
+            state is None
+            or self.source != "environment"
+            or self.active_clip_job_id is not None
+            or self.action_inflight
+            or self.closing
+        ):
+            return
+        camera = state.environment_camera
+        if (
+            not camera.reachable
+            or not camera.sensor_enabled
+            or not camera.stream_enabled
+            or not camera.storage.writable
+        ):
+            self._show_error("camera_storage_unavailable")
+            return
+        self.action_inflight = True
+        self.message.configure(
+            text="Starting a bounded 10-second, 2 fps microSD frame collection…",
+            fg=SIGNAL,
+        )
+        self._set_buttons()
+
+        def run() -> None:
+            try:
+                job_id = self.action_gate.run(
+                    lambda: self.client.start_camera_clip(
+                        camera.generation, duration_seconds=10, fps=2
+                    )
+                )
+                if job_id is not None:
+                    self._offer(("clip_started", job_id))
+            except LocalConsoleError as exc:
+                self._offer(("clip_start_error", exc.code))
+
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="noob-local-camera-clip-start",
+        ).start()
+
+    def _stop_camera_clip(self) -> None:
+        job_id = self.active_clip_job_id
+        if job_id is None or self.action_inflight or self.closing:
+            return
+        self.action_inflight = True
+        self.message.configure(
+            text="Requesting bounded camera-clip cancellation…", fg=WARN
+        )
+        self._set_buttons()
+
+        def run() -> None:
+            try:
+                stop_state = self.action_gate.run(
+                    lambda: self.client.stop_camera_clip(job_id)
+                )
+                if stop_state is not None:
+                    self._offer(("clip_stop", stop_state))
+            except LocalConsoleError as exc:
+                self._offer(("clip_stop_error", exc.code))
+
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="noob-local-camera-clip-stop",
+        ).start()
+
+    def _camera_capture(self, kind: str) -> None:
+        state = self.current_state
+        if (
+            kind != "snapshot"
+            or state is None
+            or self.source != "environment"
+            or self.action_inflight
+            or self.closing
+        ):
+            return
+        camera = state.environment_camera
+        if (
+            not camera.reachable
+            or not camera.sensor_enabled
+            or not camera.stream_enabled
+            or not camera.storage.writable
+        ):
+            self._show_error("camera_storage_unavailable")
+            return
+        self.action_inflight = True
+        self.message.configure(
+            text=(
+                "Requesting one microSD snapshot…"
+            ),
+            fg=SIGNAL,
+        )
+        self._set_buttons()
+
+        def run() -> None:
+            try:
+                action = lambda: self.client.camera_snapshot(camera.generation)
+                result = self.action_gate.run(action)
+                if result is not None:
+                    self._offer(("capture_action", result))
+            except LocalConsoleError as exc:
+                self._offer(("capture_action_error", exc.code))
+
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name=f"noob-local-camera-{kind}",
+        ).start()
+
+    def _refresh_storage(self) -> None:
+        if self.storage_inflight or self.closing:
+            return
+        state = self.current_state
+        if (
+            state is None
+            or self.source != "environment"
+            or not state.environment_camera.storage.available
+        ):
+            return
+        self.storage_inflight = True
+        self._set_buttons()
+
+        def run() -> None:
+            try:
+                self._offer(("storage", self.client.camera_storage(limit=20)))
+            except LocalConsoleError as exc:
+                self._offer(("storage_error", exc.code))
+
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="noob-local-camera-storage",
+        ).start()
+
+    def _screenshot(self) -> None:
+        if (
+            self.current_frame_bytes is None
+            or self.action_inflight
+            or self.closing
+        ):
+            return
+        data = self.current_frame_bytes
+        source_name = self.source
+        self.action_inflight = True
+        self._set_buttons()
+
+        def run() -> None:
+            try:
+                self._offer(
+                    ("screenshot", save_screenshot(data, source_name))
+                )
+            except LocalConsoleError as exc:
+                self._offer(("screenshot_error", exc.code))
+
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="noob-local-screenshot",
+        ).start()
 
     def _select_video_mode(self, _event: Any = None) -> None:
         state = self.current_state
@@ -939,20 +2962,64 @@ class NoobLocalConsole:
         self._action("disarm")
 
     def _toggle_fullscreen(self) -> None:
-        self.fullscreen = not self.fullscreen
-        self.root.attributes("-fullscreen", self.fullscreen)
-        self.fullscreen_button.configure(text="WINDOW" if self.fullscreen else "FULL SCREEN")
+        if self.fullscreen:
+            self._leave_fullscreen()
+            return
+        self.fullscreen = True
+        self.fullscreen_verify_attempt = 0
+        self.fullscreen_controller.enter()
+        self.fullscreen_button.configure(
+            text="EXIT FULLSCREEN", style="Exit.TButton"
+        )
+        self.message.configure(
+            text="Entering borderless full screen… Escape and DESKTOP remain available.",
+            fg=MUTED,
+        )
+        self.root.after(90, self._verify_fullscreen)
+
+    def _verify_fullscreen(self) -> None:
+        if not self.fullscreen:
+            return
+        if window_covers_screen(self.root):
+            self.message.configure(
+                text="Borderless full screen verified edge to edge. Escape or EXIT FULLSCREEN restores the window.",
+                fg=HEALTHY,
+            )
+            return
+        self.fullscreen_verify_attempt += 1
+        if self.fullscreen_verify_attempt < 4:
+            # Some XFCE configurations apply the panel/work-area geometry one
+            # event-loop turn after mapping.  Reassert the override geometry.
+            self.fullscreen_controller.enforce()
+            self.root.after(120, self._verify_fullscreen)
+            return
+        self._show_error("fullscreen_unconfirmed")
 
     def _leave_fullscreen(self) -> None:
-        if self.fullscreen:
-            self.fullscreen = False
-            self.root.attributes("-fullscreen", False)
-            self.fullscreen_button.configure(text="FULL SCREEN")
+        if not self.fullscreen:
+            return
+        self.fullscreen = False
+        self.fullscreen_controller.exit(topmost=self.pinned)
+        self.fullscreen_button.configure(
+            text="FULL SCREEN", style="Noob.TButton"
+        )
+        self._render_current_frame()
 
     def _toggle_pin(self) -> None:
         self.pinned = not self.pinned
-        self.root.attributes("-topmost", self.pinned)
-        self.pin_button.configure(text="UNPIN" if self.pinned else "PIN")
+        if not self.fullscreen:
+            self.root.attributes("-topmost", self.pinned)
+        self.pin_button.configure(
+            text=(
+                "UNPIN AFTER EXIT"
+                if self.fullscreen and self.pinned
+                else "PIN AFTER EXIT"
+                if self.fullscreen
+                else "UNPIN"
+                if self.pinned
+                else "PIN"
+            )
+        )
 
     def _close(self) -> None:
         if self.closing:
@@ -974,23 +3041,33 @@ class NoobLocalConsole:
             self._show_error(exc.code)
             return
         self.stop_event.set()
+        self._leave_fullscreen()
         self.root.destroy()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="N.O.O.B appliance-local target viewer")
+    parser = argparse.ArgumentParser(
+        description="N.O.O.B appliance-local target and environment viewer"
+    )
     parser.add_argument("--gateway", default=DEFAULT_GATEWAY)
     args = parser.parse_args()
+    instance_lock: LocalConsoleInstanceLock | None = None
     try:
+        instance_lock = acquire_local_console_instance_lock()
         origin = validate_loopback_gateway(args.gateway)
         token = load_local_token()
     except (ValueError, LocalConsoleError) as exc:
+        if instance_lock is not None:
+            instance_lock.close()
         code = exc.code if isinstance(exc, LocalConsoleError) else "gateway_invalid"
         raise SystemExit(f"N.O.O.B local console could not start ({code})") from None
 
-    root = tk.Tk(className="NoobLocalConsole")
-    NoobLocalConsole(root, GatewayClient(origin, token))
-    root.mainloop()
+    try:
+        root = tk.Tk(className="NoobLocalConsole")
+        NoobLocalConsole(root, GatewayClient(origin, token))
+        root.mainloop()
+    finally:
+        instance_lock.close()
     return 0
 
 

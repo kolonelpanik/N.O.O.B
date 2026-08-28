@@ -17,6 +17,8 @@ const DEFAULT_CONFIG: GatewayConfigView = {
   gatewayLabel: "uConsole · 192.0.2.83",
   streamUrl: "",
   tokenConfigured: false,
+  connectionMode: "fixed",
+  currentDeviceId: null,
 };
 
 function releasePointerLock(): void {
@@ -52,13 +54,14 @@ export interface OperatorController {
   lastAction: string;
   streamGeneration: number;
   setAuthDialogOpen(open: boolean): void;
+  adoptConnection(config: GatewayConfigView): Promise<void>;
   bootstrapToken(token: string): Promise<boolean>;
   clearToken(): Promise<void>;
   claimControl(): Promise<void>;
-  releaseControl(): Promise<void>;
+  releaseControl(): Promise<boolean>;
   emergencyRelease(): Promise<void>;
   armLocalInput(): Promise<void>;
-  disarmLocalInput(): Promise<void>;
+  disarmLocalInput(): Promise<boolean>;
   switchVideoMode(modeId: string): Promise<void>;
   setMode(mode: OperatorMode): void;
   toggleKeyboardCapture(): void;
@@ -171,6 +174,49 @@ export function useOperatorController(): OperatorController {
     };
   }, [installStatus]);
 
+  const adoptConnection = useCallback(
+    async (nextConfig: GatewayConfigView): Promise<void> => {
+      const generation = ++statusMutationGenerationRef.current;
+      authenticatedRef.current = false;
+      applyLocalRelease("Device route changed");
+      setConfig(nextConfig);
+      setStatus(null);
+      setAuthenticated(false);
+      setConnection("connecting");
+      setAuthError(null);
+      setAuthDialogOpen(false);
+      setSessionStartedAt(null);
+      setVideoModes([]);
+      setVideoModeError(null);
+      setStreamGeneration(0);
+
+      if (!nextConfig.tokenConfigured) {
+        if (generation !== statusMutationGenerationRef.current) return;
+        setConnection("unauthenticated");
+        setAuthDialogOpen(true);
+        return;
+      }
+
+      try {
+        const nextStatus = await noobApi.status();
+        if (generation !== statusMutationGenerationRef.current) return;
+        authenticatedRef.current = true;
+        setAuthenticated(true);
+        installStatus(nextStatus);
+      } catch (error) {
+        if (generation !== statusMutationGenerationRef.current) return;
+        authenticatedRef.current = false;
+        setAuthenticated(false);
+        setStatus(null);
+        setConnection(isAuthenticationFailure(error) ? "unauthenticated" : "degraded");
+        setAuthDialogOpen(true);
+        const code = error instanceof OperatorApiError ? error.code : "operator_request_failed";
+        setAuthError(code.replaceAll("_", " "));
+      }
+    },
+    [applyLocalRelease, installStatus],
+  );
+
   const bootstrapToken = useCallback(
     async (token: string): Promise<boolean> => {
       setAuthError(null);
@@ -231,7 +277,7 @@ export function useOperatorController(): OperatorController {
           loseControl("Control lost");
         }
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled || generation !== statusMutationGenerationRef.current) return;
         setConnection(isAuthenticationFailure(error) ? "unauthenticated" : "degraded");
         if (isAuthenticationFailure(error)) {
           authenticatedRef.current = false;
@@ -346,19 +392,28 @@ export function useOperatorController(): OperatorController {
     }
   }, [status?.local_input.armed, status?.local_input.exclusive_grab]);
 
-  const releaseControl = useCallback(async () => {
-    if (!claimedRef.current || ownershipTransitionRef.current !== null) return;
+  const releaseControl = useCallback(async (): Promise<boolean> => {
+    if (!claimedRef.current) return true;
+    if (ownershipTransitionRef.current !== null) return false;
     ownershipTransitionRef.current = "release";
     statusMutationGenerationRef.current += 1;
+    let confirmed = false;
     try {
       await sendInput({ op: "release_all" }, false);
       await noobApi.release();
+      confirmed = true;
     } catch {
-      await noobApi.release().catch(() => undefined);
+      try {
+        await noobApi.release();
+        confirmed = true;
+      } catch {
+        confirmed = false;
+      }
     } finally {
-      applyLocalRelease("Control released");
+      applyLocalRelease(confirmed ? "Control released" : "Control release unconfirmed");
       ownershipTransitionRef.current = null;
     }
+    return confirmed;
   }, [applyLocalRelease, sendInput]);
 
   const emergencyRelease = useCallback(async () => {
@@ -442,14 +497,14 @@ export function useOperatorController(): OperatorController {
     }
   }, [applyLocalRelease, connection, status]);
 
-  const disarmLocalInput = useCallback(async () => {
+  const disarmLocalInput = useCallback(async (): Promise<boolean> => {
     const localInput = status?.local_input;
     if (
       !authenticatedRef.current ||
       connection !== "live" ||
       ownershipTransitionRef.current !== null ||
       (localInput?.armed !== true && localInput?.exclusive_grab !== true)
-    ) return;
+    ) return localInput?.armed !== true && localInput?.exclusive_grab !== true;
 
     ownershipTransitionRef.current = "disarm";
     const generation = ++statusMutationGenerationRef.current;
@@ -457,12 +512,15 @@ export function useOperatorController(): OperatorController {
     setLocalInputError(null);
     try {
       const result = await noobApi.disarmLocalInput();
-      if (!authenticatedRef.current || generation !== statusMutationGenerationRef.current) return;
+      if (!authenticatedRef.current || generation !== statusMutationGenerationRef.current) return false;
+      const disarmed = result.local_input.armed !== true && result.local_input.exclusive_grab !== true;
       statusMutationGenerationRef.current += 1;
       setStatus((current) => current === null
         ? current
         : { ...current, local_input: result.local_input });
-      setLastAction("uConsole input disarmed");
+      setLastAction(disarmed ? "uConsole input disarmed" : "uConsole disarm unconfirmed");
+      if (!disarmed) setLocalInputError("local_input_disarm_unconfirmed");
+      return disarmed;
     } catch (error) {
       const code = error instanceof OperatorApiError ? error.code : "operator_request_failed";
       setLocalInputError(code);
@@ -474,7 +532,7 @@ export function useOperatorController(): OperatorController {
         setConnection("unauthenticated");
         setAuthDialogOpen(true);
         applyLocalRelease("Control lost");
-        return;
+        return false;
       }
       try {
         const nextStatus = await noobApi.status();
@@ -488,6 +546,7 @@ export function useOperatorController(): OperatorController {
           setConnection("degraded");
         }
       }
+      return false;
     } finally {
       ownershipTransitionRef.current = null;
       setLocalInputBusy(false);
@@ -732,6 +791,7 @@ export function useOperatorController(): OperatorController {
       lastAction,
       streamGeneration,
       setAuthDialogOpen,
+      adoptConnection,
       bootstrapToken,
       clearToken,
       claimControl,
@@ -749,6 +809,7 @@ export function useOperatorController(): OperatorController {
     [
       authDialogOpen,
       authError,
+      adoptConnection,
       armLocalInput,
       authenticated,
       bootstrapToken,

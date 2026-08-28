@@ -30,6 +30,11 @@ local-input adapter -------^ (same ControlLease and UART command path)
 
 1. **Network boundary.** The gateway binds only to loopback. Operators reach it
    through authenticated SSH forwarding and still present an application token.
+   The optional `_noob-kvm._tcp` mDNS publisher advertises only the actual SSH
+   pairing port and fixed non-secret capability labels. It never advertises the
+   loopback gateway URL or authentication material, and clients treat it as an
+   untrusted hint pending independent SSH host-key verification. The ESP32-CAM
+   uses the separate `_noobcam._tcp` service.
 2. **Command boundary.** The network API accepts a fixed JSON schema. It has no
    filesystem, process, shell, clipboard, or arbitrary USB-report endpoint.
 3. **Serial boundary.** The gateway creates the UART session and sequence
@@ -46,6 +51,10 @@ local-input adapter -------^ (same ControlLease and UART command path)
 7. **Capture-mode boundary.** One gateway process owns V4L2. Operator clients
    select only configured MJPEG profile IDs; they cannot supply dimensions,
    frame rates, pixel formats, device paths, or capture command arguments.
+8. **Environmental-camera boundary.** The optional ESP32 camera is a separate
+   fixed private-IP upstream with its own protected bearer. Callers select only
+   fixed operations and opaque object IDs. It cannot make target video ready,
+   alter HID ownership, proxy a caller URL, or expose a camera filesystem path.
 
 ## Proof ladder
 
@@ -63,6 +72,9 @@ The `/healthz` endpoint proves only that the HTTP process is alive. The
 `/readyz` endpoint additionally requires a fresh video frame and an established
 Pico UART session. When local input is enabled, it also requires both configured
 evdev identities to be open. Neither endpoint alone proves a target-side action.
+The optional environmental camera is intentionally absent from this readiness
+decision; its independent proof state and bounded media contract are described
+in [Environmental camera gateway](environment-camera.md).
 
 ## Capture output profiles
 

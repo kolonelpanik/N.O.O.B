@@ -1,4 +1,4 @@
-import { Cable, Keyboard, Monitor, Radio, Timer } from "lucide-react";
+import { Cable, Keyboard, Monitor, Radio, Timer, Video } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ProofModuleModel } from "../state/proof";
 
@@ -11,6 +11,7 @@ const icons: Record<ProofModuleModel["id"], LucideIcon> = {
   video: Monitor,
   uart: Cable,
   hid: Keyboard,
+  environment: Video,
   target: Radio,
 };
 

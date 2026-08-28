@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "noob-gateway"
-version = "0.1.0"
+version = "0.2.0"
 description = "Never Out Of Bounds hardware-in-the-loop video and HID gateway"
 requires-python = ">=3.11"
 dependencies = [

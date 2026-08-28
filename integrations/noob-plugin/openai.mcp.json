@@ -1,0 +1,8 @@
+{
+  "mcp_servers": {
+    "noob": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/dist/main.js", "--stdio"]
+    }
+  }
+}

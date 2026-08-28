@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
+  <title id="title">N.O.O.B Local Console</title>
+  <desc id="description">A cyan out-of-band console viewport with an N-shaped signal path.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101c24"/>
+      <stop offset="1" stop-color="#05090d"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#29d17d"/>
+      <stop offset="1" stop-color="#39e1df"/>
+    </linearGradient>
+  </defs>
+  <rect x="10" y="10" width="236" height="236" rx="48" fill="url(#panel)" stroke="#27343b" stroke-width="8"/>
+  <path d="M54 176V80c0-12 7-20 18-20 7 0 13 3 18 11l76 112c4 7 10 10 17 10 11 0 19-8 19-20V80" fill="none" stroke="url(#signal)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="54" cy="80" r="12" fill="#39e1df"/>
+  <circle cx="202" cy="176" r="12" fill="#29d17d"/>
+  <path d="M38 210h180" fill="none" stroke="#8c9aa2" stroke-width="6" stroke-linecap="round" opacity=".7"/>
+  <circle cx="83" cy="210" r="7" fill="#29d17d"/>
+  <circle cx="128" cy="210" r="7" fill="#39e1df"/>
+  <circle cx="173" cy="210" r="7" fill="#f2b84b"/>
+</svg>

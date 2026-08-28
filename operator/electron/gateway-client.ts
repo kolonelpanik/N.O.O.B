@@ -1,4 +1,10 @@
 import type {
+  EnvironmentCameraClipResult,
+  EnvironmentCameraJobResult,
+  EnvironmentCameraMediaPage,
+  EnvironmentCameraSnapshotResult,
+  EnvironmentCameraStateResult,
+  EnvironmentCameraStopResult,
   FrameResult,
   GatewayClaimResult,
   GatewayInputCommand,
@@ -14,6 +20,9 @@ const TOKEN_PATTERN = /^[\x21-\x7e]{32,256}$/;
 const LEASE_PATTERN = /^[0-9a-f]{32}$/;
 const REQUEST_TIMEOUT_MS = 4_000;
 const VIDEO_MODE_REQUEST_TIMEOUT_MS = 65_000;
+const MEDIA_ID_PATTERN = /^m_[0-9a-f]{32}$/;
+const CAMERA_JOB_ID_PATTERN = /^j_[0-9a-f]{32}$/;
+const CAMERA_CURSOR_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export class GatewayClientError extends Error {
   readonly publicError: PublicGatewayError;
@@ -87,8 +96,9 @@ export class GatewayClient {
     return this.json<GatewayStatus>("/api/v1/status", { method: "GET" });
   }
 
-  async frame(): Promise<FrameResult> {
-    const response = await this.request("/api/v1/frame.jpg", { method: "GET" });
+  async frame(source: "target" | "environment" = "target"): Promise<FrameResult> {
+    const path = source === "target" ? "/api/v1/frame.jpg" : "/api/v1/environment-camera/frame.jpg";
+    const response = await this.request(path, { method: "GET" });
     const contentType = response.headers.get("content-type")?.split(";", 1)[0];
     if (contentType !== "image/jpeg") {
       throw new GatewayClientError("invalid_frame", response.status);
@@ -121,6 +131,86 @@ export class GatewayClient {
 
   async stream(signal?: AbortSignal): Promise<Response> {
     return this.request("/api/v1/stream.mjpeg", { method: "GET", signal }, null);
+  }
+
+  async environmentStream(signal?: AbortSignal): Promise<Response> {
+    return this.request("/api/v1/environment-camera/stream.mjpeg", { method: "GET", signal }, null);
+  }
+
+  async environmentMediaContent(mediaId: string, signal?: AbortSignal): Promise<Response> {
+    if (!MEDIA_ID_PATTERN.test(mediaId)) throw new GatewayClientError("invalid_media_id");
+    return this.request(`/api/v1/environment-camera/storage/${mediaId}/content`, { method: "GET", signal });
+  }
+
+  async environmentMediaFrame(mediaId: string, frameIndex: number, signal?: AbortSignal): Promise<Response> {
+    if (!MEDIA_ID_PATTERN.test(mediaId) || !Number.isSafeInteger(frameIndex) || frameIndex < 0 || frameIndex > 149) {
+      throw new GatewayClientError("invalid_environment_media_frame");
+    }
+    return this.request(
+      `/api/v1/environment-camera/storage/${mediaId}/frames/${frameIndex}.jpg`,
+      { method: "GET", signal },
+    );
+  }
+
+  async setEnvironmentCamera(enabled: boolean, expectedGeneration: number): Promise<EnvironmentCameraStateResult> {
+    if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) {
+      throw new GatewayClientError("invalid_environment_camera_request");
+    }
+    return this.json<EnvironmentCameraStateResult>(
+      "/api/v1/environment-camera/state",
+      this.jsonRequest({ enabled, expected_generation: expectedGeneration }),
+    );
+  }
+
+  async captureEnvironmentSnapshot(expectedGeneration: number): Promise<EnvironmentCameraSnapshotResult> {
+    if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) {
+      throw new GatewayClientError("invalid_environment_camera_request");
+    }
+    return this.json<EnvironmentCameraSnapshotResult>(
+      "/api/v1/environment-camera/snapshot",
+      this.jsonRequest({ expected_generation: expectedGeneration }),
+    );
+  }
+
+  async listEnvironmentMedia(limit: number, cursor?: string): Promise<EnvironmentCameraMediaPage> {
+    if (
+      !Number.isSafeInteger(limit) || limit < 1 || limit > 50 ||
+      (cursor !== undefined && !CAMERA_CURSOR_PATTERN.test(cursor))
+    ) {
+      throw new GatewayClientError("invalid_environment_media_request");
+    }
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return this.json<EnvironmentCameraMediaPage>(
+      `/api/v1/environment-camera/storage?${query.toString()}`,
+      { method: "GET" },
+    );
+  }
+
+  async startEnvironmentClip(durationSeconds: number, fps: number, expectedGeneration: number): Promise<EnvironmentCameraClipResult> {
+    if (
+      !Number.isSafeInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > 30 ||
+      !Number.isSafeInteger(fps) || fps < 1 || fps > 5 ||
+      durationSeconds * fps > 150 ||
+      !Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0
+    ) throw new GatewayClientError("invalid_environment_clip_request");
+    return this.json<EnvironmentCameraClipResult>(
+      "/api/v1/environment-camera/clip",
+      this.jsonRequest({ duration_seconds: durationSeconds, fps, expected_generation: expectedGeneration }),
+    );
+  }
+
+  async getEnvironmentClipJob(jobId: string): Promise<EnvironmentCameraJobResult> {
+    if (!CAMERA_JOB_ID_PATTERN.test(jobId)) throw new GatewayClientError("invalid_environment_clip_job");
+    return this.json<EnvironmentCameraJobResult>(`/api/v1/environment-camera/jobs/${jobId}`, { method: "GET" });
+  }
+
+  async stopEnvironmentClip(jobId: string): Promise<EnvironmentCameraStopResult> {
+    if (!CAMERA_JOB_ID_PATTERN.test(jobId)) throw new GatewayClientError("invalid_environment_clip_job");
+    return this.json<EnvironmentCameraStopResult>(
+      `/api/v1/environment-camera/jobs/${jobId}/stop`,
+      this.jsonRequest(),
+    );
   }
 
   async claim(): Promise<GatewayClaimResult> {

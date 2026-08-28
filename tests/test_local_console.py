@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
+import json
+import os
 from pathlib import Path
 import queue
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = (
@@ -20,7 +26,123 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
+def environment_payload(**overrides):
+    value = {
+        "configured": True,
+        "reachable": True,
+        "stream_enabled": True,
+        "sensor_enabled": True,
+        "power_control": False,
+        "frame_ready": True,
+        "generation": 9,
+        "last_frame_age_ms": 18,
+        "viewers": 2,
+        "storage": {
+            "state": "mounted",
+            "mounted": True,
+            "writable": True,
+            "total_bytes": 8_000_000_000,
+            "free_bytes": 6_000_000_000,
+            "reserve_bytes": 10_000_000,
+            "media_count": 3,
+            "active_job_id": None,
+            "limits": {
+                "max_media_items": 500,
+                "max_total_bytes": 7_000_000_000,
+                "max_clip_duration_ms": 30_000,
+                "max_clip_fps": 5,
+                "max_clip_frames": 150,
+            },
+            "last_error": None,
+        },
+        "last_error": None,
+    }
+    value.update(overrides)
+    return value
+
+
 class LocalConsoleContractTests(unittest.TestCase):
+    def test_pairing_identity_matches_the_installed_helper_algorithm(self):
+        helper_path = (
+            Path(__file__).resolve().parents[1] / "scripts" / "noob_pairing_code.py"
+        )
+        helper_spec = importlib.util.spec_from_file_location(
+            "noob_pairing_code_for_local_console_test", helper_path
+        )
+        assert helper_spec is not None and helper_spec.loader is not None
+        helper = importlib.util.module_from_spec(helper_spec)
+        helper_spec.loader.exec_module(helper)
+
+        key = bytes([47]) * 32
+        public = f"ssh-ed25519 {base64.b64encode(key).decode('ascii')} appliance\n"
+        fingerprint = MODULE.fingerprint_for_ssh_host_public_key(public)
+        self.assertEqual(fingerprint, helper.fingerprint_for_public_key(public))
+        self.assertEqual(
+            MODULE.pairing_code_for_ssh_fingerprint(fingerprint),
+            helper.pairing_code_for_fingerprint(fingerprint),
+        )
+
+    def test_pairing_identity_loader_rejects_symlink_and_accepts_regular_key(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            key = bytes([47]) * 32
+            public = f"ssh-ed25519 {base64.b64encode(key).decode('ascii')} appliance\n"
+            key_path = directory / "ssh_host_ed25519_key.pub"
+            key_path.write_text(public, encoding="ascii")
+            code, fingerprint = MODULE.load_local_pairing_identity(key_path)
+            self.assertRegex(code, r"^[0-9]{4}-[0-9]{4}$")
+            self.assertTrue(fingerprint.startswith("SHA256:"))
+
+            link_path = directory / "host-key-link.pub"
+            link_path.symlink_to(key_path)
+            with self.assertRaisesRegex(
+                MODULE.LocalConsoleError, "pairing_identity_unavailable"
+            ):
+                MODULE.load_local_pairing_identity(link_path)
+
+    def test_ui_installer_deploys_supported_pairing_helper(self):
+        installer = (
+            Path(__file__).resolve().parents[1] / "scripts" / "install_uconsole_ui.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '"$SOURCE_ROOT/scripts/noob_pairing_code.py" /opt/noob/appliance/noob_pairing_code.py',
+            installer,
+        )
+        self.assertIn("/usr/local/bin/noob-pairing-code", installer)
+
+    def test_single_instance_lock_is_owner_private_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            os.chmod(runtime, 0o700)
+            first = MODULE.acquire_local_console_instance_lock(runtime)
+            try:
+                self.assertEqual(first.path, runtime / "noob-local-console.lock")
+                self.assertEqual(stat.S_IMODE(first.path.stat().st_mode), 0o600)
+                with self.assertRaisesRegex(
+                    MODULE.LocalConsoleError, "already_running"
+                ):
+                    MODULE.acquire_local_console_instance_lock(runtime)
+            finally:
+                first.close()
+
+            replacement = MODULE.acquire_local_console_instance_lock(runtime)
+            replacement.close()
+
+    def test_runtime_lock_directory_rejects_weak_permissions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            os.chmod(runtime, 0o755)
+            try:
+                with self.assertRaisesRegex(
+                    MODULE.LocalConsoleError, "instance_lock_unavailable"
+                ):
+                    MODULE.user_runtime_directory(
+                        environ={"XDG_RUNTIME_DIR": str(runtime)},
+                        uid=os.getuid(),
+                    )
+            finally:
+                os.chmod(runtime, 0o700)
+
     def test_gateway_origin_is_loopback_only(self):
         self.assertEqual(
             MODULE.validate_loopback_gateway("http://127.0.0.1:8765/"),
@@ -182,6 +304,93 @@ class LocalConsoleContractTests(unittest.TestCase):
                 with self.assertRaises(MODULE.LocalConsoleError):
                     MODULE.view_state_from_status(candidate)
 
+    def test_environment_camera_status_is_independent_and_backward_compatible(self):
+        base = {
+            "ok": True,
+            "serial": {"ready": True},
+            "video": {"ready": True},
+            "local_input": {
+                "enabled": True,
+                "armed": False,
+                "exclusive_grab": False,
+                "keyboard_ready": True,
+                "pointer_ready": True,
+            },
+            "control": {"active": False, "release_required": False},
+        }
+        legacy = MODULE.view_state_from_status(base)
+        self.assertFalse(legacy.environment_camera.configured)
+
+        state = MODULE.view_state_from_status(
+            {**base, "environment_camera": environment_payload()}
+        )
+        self.assertTrue(state.environment_camera.frame_ready)
+        self.assertFalse(state.environment_camera.power_control)
+        self.assertEqual(state.environment_camera.storage.media_count, 3)
+
+        malformed = environment_payload(sensor_enabled="yes")
+        with self.assertRaisesRegex(
+            MODULE.LocalConsoleError, "camera_status_unavailable"
+        ):
+            MODULE.view_state_from_status(
+                {**base, "environment_camera": malformed}
+            )
+
+    def test_environment_camera_and_storage_contracts_are_bounded(self):
+        camera = MODULE.environment_camera_from_response(
+            {"ok": True, "environment_camera": environment_payload()}
+        )
+        self.assertEqual(camera.generation, 9)
+        self.assertEqual(camera.last_frame_age_ms, 18)
+
+        item = {
+            "id": "m_00000000000000000000000000000001",
+            "kind": "snapshot",
+            "state": "complete",
+            "created_at": "2026-08-27T19:00:00Z",
+            "created_uptime_ms": 12_000,
+            "size_bytes": 123456,
+            "width": 1600,
+            "height": 1200,
+            "frame_count": 1,
+            "fps": None,
+            "duration_ms": 0,
+            "content_type": "image/jpeg",
+        }
+        catalog = MODULE.camera_storage_from_payload(
+            {
+                "ok": True,
+                "storage": environment_payload()["storage"],
+                "items": [item],
+                "next_cursor": "cursor-2",
+            }
+        )
+        self.assertEqual(catalog.items[0].item_id, item["id"])
+        self.assertIn("SNAPSHOT", catalog.items[0].display_label)
+
+        with self.assertRaisesRegex(
+            MODULE.LocalConsoleError, "camera_storage_unavailable"
+        ):
+            MODULE.camera_storage_from_payload(
+                {
+                    "ok": True,
+                    "storage": environment_payload()["storage"],
+                    "items": [{**item, "id": "../escape"}],
+                    "next_cursor": None,
+                }
+            )
+        with self.assertRaisesRegex(
+            MODULE.LocalConsoleError, "camera_storage_unavailable"
+        ):
+            MODULE.camera_storage_from_payload(
+                {
+                    "ok": True,
+                    "storage": environment_payload()["storage"],
+                    "items": [item, item],
+                    "next_cursor": None,
+                }
+            )
+
     def test_close_waits_for_inflight_arm_and_disarms_last(self):
         gate = MODULE.ActionGate()
         arm_started = threading.Event()
@@ -318,13 +527,369 @@ class LocalConsoleContractTests(unittest.TestCase):
         self.assertEqual(kwargs["method"], "POST")
         self.assertGreaterEqual(kwargs["timeout"], 60.0)
         self.assertEqual(
-            __import__("json").loads(kwargs["body"]),
+            json.loads(kwargs["body"]),
             {"mode_id": "1080p30", "expected_generation": 7},
         )
 
         with self.assertRaises(MODULE.LocalConsoleError):
             client.set_video_mode("../unsafe", 8)
         self.assertEqual(len(client.calls), 1)
+
+    def test_environment_client_uses_exact_bounded_routes_and_payloads(self):
+        snapshot_item = {
+            "id": "m_00000000000000000000000000000001",
+            "kind": "snapshot",
+            "state": "complete",
+            "created_at": "2026-08-27T19:00:00Z",
+            "created_uptime_ms": 100,
+            "size_bytes": 1111,
+            "width": 640,
+            "height": 480,
+            "frame_count": 1,
+            "fps": None,
+            "duration_ms": 0,
+            "content_type": "image/jpeg",
+        }
+        clip_item = {
+            "id": "m_00000000000000000000000000000002",
+            "kind": "clip",
+            "state": "complete",
+            "created_at": "2026-08-27T19:00:10Z",
+            "created_uptime_ms": 200,
+            "size_bytes": 2222,
+            "width": 640,
+            "height": 480,
+            "frame_count": 20,
+            "fps": 2,
+            "duration_ms": 10_000,
+            "content_type": "application/vnd.noob.clip+json",
+        }
+        job_id = "j_00000000000000000000000000000003"
+
+        class CameraClient(MODULE.GatewayClient):
+            def __init__(self):
+                self.calls = []
+
+            def _request(self, path, **kwargs):
+                self.calls.append((path, kwargs))
+                if path.endswith("/frame.jpg"):
+                    return b"\xff\xd8frame\xff\xd9"
+                if path.endswith("/state"):
+                    return json.dumps(
+                        {"ok": True, "environment_camera": environment_payload()}
+                    ).encode()
+                if "storage?" in path:
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "storage": environment_payload()["storage"],
+                            "items": [snapshot_item],
+                            "next_cursor": None,
+                        }
+                    ).encode()
+                if path.endswith("/snapshot"):
+                    return json.dumps({"ok": True, "item": snapshot_item}).encode()
+                if path.endswith("/clip"):
+                    return json.dumps(
+                        {"ok": True, "job_id": job_id, "state": "queued"}
+                    ).encode()
+                if path.endswith("/stop"):
+                    return json.dumps(
+                        {"ok": True, "job_id": job_id, "state": "cancelling"}
+                    ).encode()
+                if "/jobs/" in path:
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "job": {
+                                "job_id": job_id,
+                                "kind": "clip",
+                                "state": "complete",
+                                "created_uptime_ms": 200,
+                                "frames_written": 20,
+                                "frames_target": 20,
+                                "media_id": clip_item["id"],
+                                "error_code": None,
+                            },
+                        }
+                    ).encode()
+                return json.dumps({"ok": True, "item": clip_item}).encode()
+
+        client = CameraClient()
+        self.assertEqual(client.frame("environment"), b"\xff\xd8frame\xff\xd9")
+        self.assertTrue(client.set_environment_enabled(False, 9).configured)
+        self.assertEqual(
+            client.camera_storage(limit=20).items[0].kind, "snapshot"
+        )
+        self.assertEqual(client.camera_snapshot(9).item_id, snapshot_item["id"])
+        self.assertEqual(
+            client.start_camera_clip(9, duration_seconds=10), job_id
+        )
+        self.assertEqual(client.camera_clip_job(job_id).state, "complete")
+        self.assertEqual(client.stop_camera_clip(job_id), "cancelling")
+        self.assertEqual(client.camera_media(clip_item["id"]).duration_ms, 10_000)
+
+        paths = [path for path, _kwargs in client.calls]
+        self.assertEqual(
+            paths,
+            [
+                "/api/v1/environment-camera/frame.jpg",
+                "/api/v1/environment-camera/state",
+                "/api/v1/environment-camera/storage?limit=20",
+                "/api/v1/environment-camera/snapshot",
+                "/api/v1/environment-camera/clip",
+                f"/api/v1/environment-camera/jobs/{job_id}",
+                f"/api/v1/environment-camera/jobs/{job_id}/stop",
+                f"/api/v1/environment-camera/storage/{clip_item['id']}",
+            ],
+        )
+        self.assertEqual(
+            json.loads(client.calls[1][1]["body"]),
+            {"enabled": False, "expected_generation": 9},
+        )
+        self.assertEqual(
+            json.loads(client.calls[4][1]["body"]),
+            {"duration_seconds": 10, "fps": 2, "expected_generation": 9},
+        )
+        self.assertGreaterEqual(client.calls[4][1]["timeout"], 30.0)
+        self.assertEqual(client.calls[6][1]["method"], "POST")
+        self.assertEqual(client.calls[6][1]["body"], b"{}")
+
+    def test_camera_clip_job_accepts_cancellation_states(self):
+        job_id = "j_00000000000000000000000000000003"
+        base = {
+            "job_id": job_id,
+            "kind": "clip",
+            "created_uptime_ms": 200,
+            "frames_written": 3,
+            "frames_target": 20,
+            "media_id": None,
+            "error_code": None,
+        }
+        for state in ("cancelling", "cancelled"):
+            with self.subTest(state=state):
+                job = MODULE.camera_clip_job_from_payload(
+                    {"ok": True, "job": {**base, "state": state}}
+                )
+                self.assertEqual(job.state, state)
+
+    def test_screenshot_is_private_and_never_overwrites(self):
+        data = b"\xff\xd8private-jpeg\xff\xd9"
+        captured_at = MODULE.datetime(2026, 8, 27, 19, 0, 0)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "shots"
+            first = MODULE.save_screenshot(
+                data,
+                "environment",
+                directory=directory,
+                captured_at=captured_at,
+            )
+            second = MODULE.save_screenshot(
+                data,
+                "environment",
+                directory=directory,
+                captured_at=captured_at,
+            )
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.read_bytes(), data)
+            self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+            self.assertTrue(second.name.endswith("-1.jpg"))
+
+        with self.assertRaisesRegex(
+            MODULE.LocalConsoleError, "screenshot_unavailable"
+        ):
+            MODULE.save_screenshot(b"not-jpeg", "target")
+
+    def test_zoom_and_pan_geometry_is_bounded(self):
+        self.assertEqual(
+            MODULE.image_render_size(1920, 1080, 800, 600, "FIT"),
+            (800, 450),
+        )
+        self.assertEqual(
+            MODULE.image_render_size(1920, 1080, 800, 600, "200%"),
+            (3840, 2160),
+        )
+        self.assertEqual(
+            MODULE.clamp_pan(9999, -9999, 1600, 1200, 800, 600),
+            (400, -300),
+        )
+
+    def test_fullscreen_controller_remaps_borderless_and_restores_geometry(self):
+        class FakeRoot:
+            def __init__(self):
+                self.geometry_value = "1100x680+90+18"
+                self.width = 1100
+                self.height = 680
+                self.x = 90
+                self.y = 18
+                self.calls = []
+
+            def update_idletasks(self):
+                self.calls.append(("update",))
+
+            def geometry(self, value=None):
+                if value is None:
+                    return self.geometry_value
+                self.calls.append(("geometry", value))
+                self.geometry_value = value
+                match = MODULE.re.fullmatch(
+                    r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", value
+                )
+                assert match is not None
+                self.width, self.height, self.x, self.y = map(
+                    int, match.groups()
+                )
+
+            def withdraw(self):
+                self.calls.append(("withdraw",))
+
+            def deiconify(self):
+                self.calls.append(("deiconify",))
+
+            def state(self, value):
+                self.calls.append(("state", value))
+
+            def overrideredirect(self, value):
+                self.calls.append(("override", value))
+
+            def attributes(self, name, value):
+                self.calls.append(("attribute", name, value))
+
+            def lift(self):
+                self.calls.append(("lift",))
+
+            def focus_force(self):
+                self.calls.append(("focus",))
+
+            def winfo_screenwidth(self):
+                return 1280
+
+            def winfo_screenheight(self):
+                return 720
+
+            def winfo_id(self):
+                return 0x1234
+
+            def winfo_rootx(self):
+                return self.x
+
+            def winfo_rooty(self):
+                return self.y
+
+            def winfo_width(self):
+                return self.width
+
+            def winfo_height(self):
+                return self.height
+
+        root = FakeRoot()
+        wm_calls = []
+
+        def wm_runner(command, **_kwargs):
+            wm_calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        controller = MODULE.FullscreenController(root, command_runner=wm_runner)
+        controller.enter()
+        self.assertTrue(root.calls.index(("withdraw",)) < root.calls.index(("override", True)))
+        self.assertIn(("attribute", "-fullscreen", True), root.calls)
+        self.assertIn(("geometry", "1280x720+0+0"), root.calls)
+        self.assertTrue(MODULE.window_covers_screen(root))
+        self.assertIn(
+            (
+                "/usr/bin/wmctrl",
+                "-i",
+                "-r",
+                "0x1234",
+                "-b",
+                "add,fullscreen,above",
+            ),
+            wm_calls,
+        )
+        self.assertIn(
+            ("/usr/bin/xdotool", "windowmap", "--sync", str(0x1234)),
+            wm_calls,
+        )
+
+        controller.exit(topmost=False)
+        self.assertIn(("override", False), root.calls)
+        self.assertEqual(root.geometry_value, "1100x680+90+18")
+        self.assertIn(("attribute", "-topmost", False), root.calls)
+        self.assertIn(
+            (
+                "/usr/bin/wmctrl",
+                "-i",
+                "-r",
+                "0x1234",
+                "-b",
+                "remove,fullscreen,above",
+            ),
+            wm_calls,
+        )
+        self.assertGreaterEqual(
+            wm_calls.count(
+                ("/usr/bin/xdotool", "windowmap", "--sync", str(0x1234))
+            ),
+            2,
+        )
+
+    def test_leaving_target_source_disarms_before_source_event(self):
+        status = MODULE.view_state_from_status(
+            {
+                "ok": True,
+                "serial": {"ready": True},
+                "video": {"ready": True},
+                "local_input": {
+                    "enabled": True,
+                    "armed": False,
+                    "exclusive_grab": False,
+                    "keyboard_ready": True,
+                    "pointer_ready": True,
+                },
+                "control": {"active": False, "release_required": False},
+                "environment_camera": environment_payload(),
+            }
+        )
+
+        class Variable:
+            def __init__(self):
+                self.value = "target"
+
+            def set(self, value):
+                self.value = value
+
+        class ImmediateThread:
+            def __init__(self, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def disarm(self):
+                self.calls.append("disarm")
+                return status
+
+        console = MODULE.NoobLocalConsole.__new__(MODULE.NoobLocalConsole)
+        console.source = "target"
+        console.source_var = Variable()
+        console.current_state = status
+        console.action_inflight = False
+        console.closing = False
+        console.client = Client()
+        console.action_gate = MODULE.ActionGate()
+        console._set_buttons = lambda: None
+        offered = []
+        console._offer = offered.append
+        with mock.patch.object(MODULE.threading, "Thread", ImmediateThread):
+            console._choose_source("environment")
+        self.assertEqual(console.client.calls, ["disarm"])
+        self.assertEqual(offered[0][0], "source_action")
+        self.assertEqual(offered[0][1][1], "environment")
 
     def test_partial_arm_success_is_reconciled_with_disarm(self):
         class PartialArmClient(MODULE.GatewayClient):

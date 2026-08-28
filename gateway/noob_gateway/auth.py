@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hmac
-from pathlib import Path
+import re
 import stat
+from pathlib import Path
 
 from aiohttp import web
 
@@ -22,18 +23,57 @@ LOCAL_CONSOLE_ROUTES = frozenset(
         ("POST", "/api/v1/video/mode"),
         ("POST", "/api/v1/local-input/arm"),
         ("POST", "/api/v1/local-input/disarm"),
+        ("GET", "/api/v1/environment-camera/status"),
+        ("POST", "/api/v1/environment-camera/state"),
+        ("GET", "/api/v1/environment-camera/frame.jpg"),
+        ("GET", "/api/v1/environment-camera/stream.mjpeg"),
+        ("GET", "/api/v1/environment-camera/storage"),
+        ("POST", "/api/v1/environment-camera/snapshot"),
+        ("POST", "/api/v1/environment-camera/clip"),
     }
 )
+
+_LOCAL_CAMERA_DYNAMIC_ROUTES = (
+    ("GET", re.compile(r"^/api/v1/environment-camera/jobs/j_[0-9a-f]{32}$")),
+    (
+        "POST",
+        re.compile(r"^/api/v1/environment-camera/jobs/j_[0-9a-f]{32}/stop$"),
+    ),
+    ("GET", re.compile(r"^/api/v1/environment-camera/storage/m_[0-9a-f]{32}$")),
+    (
+        "GET",
+        re.compile(r"^/api/v1/environment-camera/storage/m_[0-9a-f]{32}/content$"),
+    ),
+    (
+        "GET",
+        re.compile(
+            r"^/api/v1/environment-camera/storage/m_[0-9a-f]{32}/frames/(?:0|[1-9][0-9]{0,2})\.jpg$"
+        ),
+    ),
+)
+
+
+def _local_console_route_allowed(method: str, path: str) -> bool:
+    if (method, path) in LOCAL_CONSOLE_ROUTES:
+        return True
+    return any(
+        method == allowed_method and pattern.fullmatch(path)
+        for allowed_method, pattern in _LOCAL_CAMERA_DYNAMIC_ROUTES
+    )
 
 
 def load_token(path: str) -> str:
     token_path = Path(path)
     mode = stat.S_IMODE(token_path.stat().st_mode)
     if mode & 0o077:
-        raise AuthConfigError("bearer token file must not be accessible by group or others")
+        raise AuthConfigError(
+            "bearer token file must not be accessible by group or others"
+        )
     token = token_path.read_text(encoding="ascii").strip()
     if not 32 <= len(token) <= 256 or any(char.isspace() for char in token):
-        raise AuthConfigError("bearer token must be 32-256 non-whitespace ASCII characters")
+        raise AuthConfigError(
+            "bearer token must be 32-256 non-whitespace ASCII characters"
+        )
     return token
 
 
@@ -64,7 +104,7 @@ def bearer_middleware(
                         candidate, local_console_token
                     )
         if local_authorized and not authorized:
-            if (request.method, request.path) in LOCAL_CONSOLE_ROUTES:
+            if _local_console_route_allowed(request.method, request.path):
                 return await handler(request)
             raise web.HTTPForbidden(
                 text='{"ok":false,"error":"insufficient_scope"}',

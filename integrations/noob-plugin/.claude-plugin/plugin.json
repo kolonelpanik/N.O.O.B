@@ -1,0 +1,6 @@
+{
+  "name": "noob-plugin",
+  "version": "0.2.0",
+  "description": "Observe and safely operate a paired N.O.O.B. hardware KVM appliance.",
+  "mcpServers": "./claude/.mcp.json"
+}

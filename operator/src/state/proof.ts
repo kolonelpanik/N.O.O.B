@@ -8,7 +8,7 @@ export interface ProofField {
 }
 
 export interface ProofModuleModel {
-  id: "session" | "video" | "uart" | "hid" | "target";
+  id: "session" | "video" | "uart" | "hid" | "environment" | "target";
   title: string;
   state: string;
   tone: ProofTone;
@@ -33,6 +33,8 @@ export function deriveProofModules(
 ): ProofModuleModel[] {
   const serialReady = status?.serial.ready === true;
   const videoReady = status?.video.ready === true;
+  const environment = status?.environment_camera;
+  const environmentReady = environment?.frame_ready === true;
   return [
     {
       id: "session",
@@ -78,6 +80,28 @@ export function deriveProofModules(
       fields: [
         { label: "Keyboard", value: EM_DASH },
         { label: "Mouse", value: EM_DASH },
+      ],
+    },
+    {
+      id: "environment",
+      title: "Environment",
+      state: environmentReady ? "Live" : environment ? (environment.reachable ? "Idle" : "Degraded") : EM_DASH,
+      tone: environmentReady ? "healthy" : environment ? (environment.reachable ? "unknown" : "degraded") : "unknown",
+      fields: [
+        {
+          label: "Camera",
+          value: environment === undefined
+            ? EM_DASH
+            : environment.stream_enabled ? "Stream on" : "Stream off",
+        },
+        {
+          label: "Storage",
+          value: environment === undefined
+            ? EM_DASH
+            : environment.storage.mounted
+              ? environment.storage.writable ? "Mounted" : "Read only"
+              : textOrDash(environment.storage.state),
+        },
       ],
     },
     {

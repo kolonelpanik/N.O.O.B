@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 from noob_gateway.app import RUNTIME_KEY, create_app  # noqa: E402
 from noob_gateway.config import GatewayConfig, LocalInputConfig  # noqa: E402
 from noob_gateway.control_lease import ControlLease  # noqa: E402
+from noob_gateway.environment_camera import EnvironmentFrame  # noqa: E402
 from noob_gateway.serial_link import SerialTimeout, SerialUnavailable  # noqa: E402
 from noob_gateway.video import (  # noqa: E402
     FrameSnapshot,
@@ -231,6 +232,154 @@ class FakeLocalInput:
         return True
 
 
+class FakeEnvironmentCamera:
+    MEDIA_ID = "m_" + "1" * 32
+    CLIP_ID = "m_" + "2" * 32
+    JOB_ID = "j_" + "3" * 32
+
+    def __init__(self):
+        self.reachable = True
+        self.enabled = True
+        self.generation = 4
+        self.viewer_count = 0
+        self.state_calls = []
+        self.frame = EnvironmentFrame(
+            b"\xff\xd8environment\xff\xd9",
+            9,
+            time.monotonic(),
+            self.generation,
+            640,
+            480,
+        )
+
+    @property
+    def status(self):
+        return {
+            "configured": True,
+            "reachable": self.reachable,
+            "device_id": "cam_0123456789abcdef",
+            "stream_enabled": self.enabled,
+            "sensor_enabled": self.enabled,
+            "sensor_initialized": self.enabled,
+            "power_control": False,
+            "frame_ready": self.reachable and self.enabled,
+            "generation": self.generation,
+            "sequence": self.frame.sequence if self.enabled else None,
+            "width": 640,
+            "height": 480,
+            "last_frame_age_ms": 10 if self.enabled else None,
+            "viewers": self.viewer_count,
+            "storage": {
+                "state": "mounted",
+                "mounted": True,
+                "writable": True,
+                "total_bytes": 100_000,
+                "free_bytes": 80_000,
+                "media_count": 2,
+            },
+            "last_error": None if self.reachable else "camera_unavailable",
+        }
+
+    async def start(self):
+        return None
+
+    async def stop(self):
+        return None
+
+    async def set_enabled(self, enabled, expected_generation):
+        self.state_calls.append((enabled, expected_generation))
+        if expected_generation != self.generation:
+            from noob_gateway.environment_camera import (  # noqa: PLC0415
+                EnvironmentCameraGenerationConflict,
+            )
+
+            raise EnvironmentCameraGenerationConflict()
+        if enabled != self.enabled:
+            self.enabled = enabled
+            self.generation += 1
+            self.frame = EnvironmentFrame(
+                self.frame.data,
+                self.frame.sequence + 1,
+                time.monotonic(),
+                self.generation,
+                640,
+                480,
+            )
+        return self.status
+
+    async def get_frame(self):
+        return self.frame
+
+    async def acquire_viewer(self):
+        self.viewer_count += 1
+
+    async def release_viewer(self):
+        self.viewer_count = max(0, self.viewer_count - 1)
+
+    async def wait_for_frame(self, _after_sequence, timeout=5.0):
+        return self.frame
+
+    async def storage_status(self):
+        return self.status["storage"]
+
+    @staticmethod
+    def _item(media_id, kind):
+        return {
+            "id": media_id,
+            "kind": kind,
+            "state": "complete",
+            "created_at": "2026-08-27T20:00:00Z",
+            "created_uptime_ms": 100,
+            "size_bytes": 100,
+            "width": 640,
+            "height": 480,
+            "frame_count": 2 if kind == "clip" else 1,
+            "fps": 1 if kind == "clip" else None,
+            "duration_ms": 2000 if kind == "clip" else 0,
+            "content_type": (
+                "application/vnd.noob.clip+json" if kind == "clip" else "image/jpeg"
+            ),
+        }
+
+    async def list_media(self, *, cursor, limit):
+        return {
+            "items": [self._item(self.MEDIA_ID, "snapshot")][:limit],
+            "next_cursor": "cursor_2" if cursor is None else None,
+        }
+
+    async def get_media(self, media_id):
+        return self._item(
+            media_id, "clip" if media_id == self.CLIP_ID else "snapshot"
+        )
+
+    async def get_snapshot_content(self, _media_id):
+        return self.frame.data
+
+    async def get_clip_frame(self, _media_id, _frame_index):
+        return self.frame.data
+
+    async def create_snapshot(self, _expected_generation):
+        return self._item(self.MEDIA_ID, "snapshot")
+
+    async def create_clip(self, *, duration_seconds, fps, expected_generation):
+        return {"job_id": self.JOB_ID, "state": "queued"}
+
+    async def get_job(self, _job_id):
+        return {
+            "job_id": self.JOB_ID,
+            "kind": "clip",
+            "state": "complete",
+            "created_uptime_ms": 100,
+            "frames_written": 2,
+            "frames_target": 2,
+            "media_id": self.CLIP_ID,
+            "error_code": None,
+        }
+
+    async def stop_job(self, job_id):
+        return {"job_id": job_id, "state": "cancelling"}
+
+
 class GatewayAppTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.serial = FakeSerial()
@@ -268,6 +417,172 @@ class GatewayAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 401)
         response = await self.client.get("/api/v1/status", headers=self.auth)
         self.assertEqual(response.status, 200)
+
+    async def test_optional_environment_camera_never_changes_target_readyz(self):
+        camera = FakeEnvironmentCamera()
+        camera.reachable = False
+        app = create_app(
+            GatewayConfig(),
+            token=TOKEN,
+            serial_link=FakeSerial(),
+            video=FakeVideo(),
+            environment_camera=camera,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            ready = await client.get("/readyz")
+            self.assertEqual(ready.status, 200)
+            self.assertTrue((await ready.json())["ok"])
+
+            status = await client.get("/api/v1/status", headers=self.auth)
+            payload = await status.json()
+            self.assertTrue(payload["video"]["ready"])
+            self.assertTrue(payload["serial"]["ready"])
+            self.assertFalse(payload["environment_camera"]["reachable"])
+        finally:
+            await client.close()
+
+    async def test_environment_camera_routes_are_strict_bounded_and_opaque(self):
+        camera = FakeEnvironmentCamera()
+        app = create_app(
+            GatewayConfig(),
+            token=TOKEN,
+            serial_link=FakeSerial(),
+            video=FakeVideo(),
+            environment_camera=camera,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            status = await client.get(
+                "/api/v1/environment-camera/status", headers=self.auth
+            )
+            self.assertEqual(status.status, 200)
+            self.assertFalse(
+                (await status.json())["environment_camera"]["power_control"]
+            )
+
+            for body in (
+                {"enabled": False},
+                {"enabled": False, "expected_generation": True},
+                {
+                    "enabled": False,
+                    "expected_generation": 4,
+                    "upstream_url": "http://example.com",
+                },
+            ):
+                with self.subTest(body=body):
+                    rejected = await client.post(
+                        "/api/v1/environment-camera/state",
+                        json=body,
+                        headers=self.auth,
+                    )
+                    self.assertEqual(rejected.status, 400)
+
+            stale = await client.post(
+                "/api/v1/environment-camera/state",
+                json={"enabled": False, "expected_generation": 3},
+                headers=self.auth,
+            )
+            self.assertEqual(stale.status, 409)
+            changed = await client.post(
+                "/api/v1/environment-camera/state",
+                json={"enabled": False, "expected_generation": 4},
+                headers=self.auth,
+            )
+            self.assertEqual(changed.status, 200)
+            self.assertEqual(
+                (await changed.json())["environment_camera"]["generation"], 5
+            )
+            await client.post(
+                "/api/v1/environment-camera/state",
+                json={"enabled": True, "expected_generation": 5},
+                headers=self.auth,
+            )
+
+            frame = await client.get(
+                "/api/v1/environment-camera/frame.jpg", headers=self.auth
+            )
+            self.assertEqual(frame.status, 200)
+            self.assertEqual(frame.content_type, "image/jpeg")
+            self.assertEqual(frame.headers["X-NOOB-Environment-Generation"], "6")
+
+            bad_query = await client.get(
+                "/api/v1/environment-camera/storage?limit=51", headers=self.auth
+            )
+            self.assertEqual(bad_query.status, 400)
+            storage = await client.get(
+                "/api/v1/environment-camera/storage?limit=1", headers=self.auth
+            )
+            self.assertEqual(storage.status, 200)
+            self.assertEqual(len((await storage.json())["items"]), 1)
+
+            item = await client.get(
+                f"/api/v1/environment-camera/storage/{camera.MEDIA_ID}",
+                headers=self.auth,
+            )
+            self.assertEqual(item.status, 200)
+            content = await client.get(
+                f"/api/v1/environment-camera/storage/{camera.MEDIA_ID}/content",
+                headers=self.auth,
+            )
+            self.assertEqual(content.status, 200)
+            clip_frame = await client.get(
+                f"/api/v1/environment-camera/storage/{camera.CLIP_ID}/frames/0.jpg",
+                headers=self.auth,
+            )
+            self.assertEqual(clip_frame.status, 200)
+            traversal = await client.get(
+                "/api/v1/environment-camera/storage/../../etc/passwd",
+                headers=self.auth,
+            )
+            self.assertEqual(traversal.status, 404)
+
+            snapshot = await client.post(
+                "/api/v1/environment-camera/snapshot",
+                json={"expected_generation": 6},
+                headers=self.auth,
+            )
+            self.assertEqual(snapshot.status, 201)
+            clip = await client.post(
+                "/api/v1/environment-camera/clip",
+                json={
+                    "duration_seconds": 5,
+                    "fps": 2,
+                    "expected_generation": 6,
+                },
+                headers=self.auth,
+            )
+            self.assertEqual(clip.status, 202)
+            self.assertEqual((await clip.json())["job_id"], camera.JOB_ID)
+            job = await client.get(
+                f"/api/v1/environment-camera/jobs/{camera.JOB_ID}",
+                headers=self.auth,
+            )
+            self.assertEqual(job.status, 200)
+            self.assertEqual((await job.json())["job"]["media_id"], camera.CLIP_ID)
+            stop = await client.post(
+                f"/api/v1/environment-camera/jobs/{camera.JOB_ID}/stop",
+                json={},
+                headers=self.auth,
+            )
+            self.assertEqual(stop.status, 200)
+            self.assertEqual((await stop.json())["state"], "cancelling")
+            bad_stop = await client.post(
+                f"/api/v1/environment-camera/jobs/{camera.JOB_ID}/stop",
+                json={"delete": True},
+                headers=self.auth,
+            )
+            self.assertEqual(bad_stop.status, 400)
+
+            no_delete = await client.delete(
+                f"/api/v1/environment-camera/storage/{camera.MEDIA_ID}",
+                headers=self.auth,
+            )
+            self.assertEqual(no_delete.status, 405)
+        finally:
+            await client.close()
 
     async def test_video_modes_are_allowlisted_and_switch_uses_generation(self):
         modes = await self.client.get("/api/v1/video/modes", headers=self.auth)
@@ -390,6 +705,7 @@ class GatewayAppTests(unittest.IsolatedAsyncioTestCase):
             local_console_token=LOCAL_TOKEN,
             serial_link=FakeSerial(),
             video=FakeVideo(),
+            environment_camera=FakeEnvironmentCamera(),
             local_input=local_input,
         )
         client = TestClient(TestServer(app))
@@ -400,6 +716,9 @@ class GatewayAppTests(unittest.IsolatedAsyncioTestCase):
                 "/api/v1/status",
                 "/api/v1/frame.jpg",
                 "/api/v1/video/modes",
+                "/api/v1/environment-camera/status",
+                "/api/v1/environment-camera/frame.jpg",
+                "/api/v1/environment-camera/storage",
             ):
                 response = await client.get(path, headers=local_auth)
                 self.assertEqual(response.status, 200, path)
@@ -420,6 +739,30 @@ class GatewayAppTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(disarmed.status, 200)
 
+            camera_state = await client.post(
+                "/api/v1/environment-camera/state",
+                json={"enabled": False, "expected_generation": 4},
+                headers=local_auth,
+            )
+            self.assertEqual(camera_state.status, 200)
+            camera_snapshot = await client.post(
+                "/api/v1/environment-camera/snapshot",
+                json={"expected_generation": 5},
+                headers=local_auth,
+            )
+            self.assertEqual(camera_snapshot.status, 201)
+            camera_item = await client.get(
+                f"/api/v1/environment-camera/storage/{FakeEnvironmentCamera.MEDIA_ID}",
+                headers=local_auth,
+            )
+            self.assertEqual(camera_item.status, 200)
+            stopped_clip = await client.post(
+                f"/api/v1/environment-camera/jobs/{FakeEnvironmentCamera.JOB_ID}/stop",
+                json={},
+                headers=local_auth,
+            )
+            self.assertEqual(stopped_clip.status, 200)
+
             for path in (
                 "/api/v1/control/claim",
                 "/api/v1/release-all",
@@ -429,6 +772,12 @@ class GatewayAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     (await response.json())["error"], "insufficient_scope"
                 )
+
+            forbidden_delete = await client.delete(
+                f"/api/v1/environment-camera/storage/{FakeEnvironmentCamera.MEDIA_ID}",
+                headers=local_auth,
+            )
+            self.assertEqual(forbidden_delete.status, 403)
         finally:
             await client.close()
 

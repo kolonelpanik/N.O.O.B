@@ -74,4 +74,22 @@ describe("useFrameFeed restart recovery", () => {
     expect(result.current.imageSource).toBe(initialSource);
     unmount();
   });
+
+  it("uses the selected environmental source for still-frame fallback", async () => {
+    const frame = vi.spyOn(noobApi, "frame").mockResolvedValue({
+      bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+      contentType: "image/jpeg",
+      sequence: "3",
+    });
+    const { result, unmount } = renderHook(() =>
+      useFrameFeed(true, "noob://gateway/environment-stream", 5, 1, "environment"),
+    );
+
+    act(() => result.current.markStreamFailed());
+    await act(async () => Promise.resolve());
+
+    expect(frame).toHaveBeenCalledWith("environment");
+    expect(result.current.imageSource).toBe("blob:noob-frame-0");
+    unmount();
+  });
 });

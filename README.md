@@ -56,6 +56,14 @@ enough that “remote keyboard” never quietly becomes “remote shell.”
 - **Give agents a narrow control surface.** Authenticated HTTP endpoints accept
   fixed input envelopes and current-frame requests—never arbitrary shell,
   filesystem, process, clipboard, or raw USB-report access.
+- **Add independent environmental context.** An optional ESP32-CAM can provide
+  a second, clearly labeled non-target view with logical stream control,
+  fullscreen/zoom/screenshot tools, and explicit microSD snapshots or bounded
+  clips. It never substitutes for HDMI target proof.
+- **Find the appliance without memorizing an address.** The operator and MCP
+  plugin can discover the uConsole over a bounded `_noob-kvm._tcp` hint, while
+  manual private-address pairing and independent SSH host-key verification
+  remain available.
 - **Fail closed.** Session replacement, stale leases, malformed input, UART
   uncertainty, device loss, watchdog expiry, and process shutdown all converge
   on releasing held input.
@@ -161,6 +169,18 @@ pinned above XFCE, switched full-screen, or hidden back to the desktop; local
 and desktop operators may observe the same stream while the gateway still
 enforces one input owner.
 
+The optional [environmental camera lane](docs/environment-camera.md) is kept
+visually and cryptographically separate from target HDMI. Both operator
+surfaces can switch between Target and Environment, zoom or fullscreen the
+selected feed, download a local screenshot, and explicitly store or review
+camera-owned microSD media. Camera reachability, hardware identity, fresh
+frame evidence, storage state, and target readiness remain separate proofs.
+
+![N.O.O.B. environmental camera operator concept](design/noob-operator-camera-concept.png)
+
+> Product-interface concept: the implemented controls follow this separation,
+> but live values and target imagery always come from the connected hardware.
+
 Both interfaces select the same gateway-owned capture profile. The gateway
 stops the old V4L2 process before starting the replacement, verifies the
 negotiated format and a fresh JPEG, and rolls back on mismatch. Resolution
@@ -222,7 +242,11 @@ installer. Bring up each proof layer deliberately:
 6. **Start the operator.** Establish a verified SSH forward, then follow
    [`operator/README.md`](operator/README.md) to build and launch the Electron
    app.
-7. **Prove the target.** Complete the acceptance ladder with a blank document
+7. **Enable optional discovery.** Keep manual private-address pairing as the
+   fallback, or install the bounded `_noob-kvm._tcp` SSH advertisement using
+   [Appliance discovery](docs/appliance-discovery.md). Discovery never replaces
+   independent host-key verification.
+8. **Prove the target.** Complete the acceptance ladder with a blank document
    and harmless input. Do not equate device enumeration or an ACK with a
    target-visible result.
 
@@ -250,7 +274,7 @@ MacBook target:
 | Local controls | uConsole keyboard and trackball forwarded through the shared lease; native left, right, and middle mapping retained |
 | Desktop operator | Live Electron view, authenticated ownership, safe release, and automatic stream recovery after a gateway restart |
 | Agent path | Bounded API opened Chrome, created a tab, navigated to YouTube, and was verified through a fresh capture frame |
-| Automated checks | 109 Python gateway/Pico tests (plus 20 subtests) and 59 Electron tests passing; Electron lint, TypeScript/build, and dependency audit clean |
+| Automated checks | 193 Python gateway/Pico/camera tests (plus 60 subtests), 120 Electron tests across 23 files, and 51 agent-plugin tests across 9 files passing; Electron lint/build, plugin typecheck/build, lock checks, and both npm dependency audits clean |
 
 This is a working prototype, not a certification claim. The full reboot and
 failure-injection matrix in [Acceptance](docs/acceptance.md) remains the bar for
@@ -280,6 +304,8 @@ because a device enumerated.
 | [`pico/`](pico/) | CircuitPython firmware and bounded HID protocol |
 | [`gateway/`](gateway/) | Authenticated video, lease, UART, and local-input gateway |
 | [`operator/`](operator/) | Electron human/agent control surface |
+| [`camera/`](camera/) | Optional ESP32-CAM firmware, secure provisioning, and direct acceptance tooling |
+| [`integrations/noob-plugin/`](integrations/noob-plugin/) | Codex/ChatGPT and Claude-compatible MCP operator plugin |
 | [`config/`](config/) | Strict example and reference appliance configuration |
 | [`packaging/`](packaging/) | Hardened systemd service template |
 | [`tests/`](tests/) | Host-side protocol and gateway tests |

@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useRef, type CSSProperties } from "react";
 import type { GatewayInputCommand } from "../../shared/gateway-contract";
 import type { OperatorMode } from "../hooks/useOperatorController";
 import { mouseButtonFromDom, splitRelativeMovement } from "../input/input-mapping";
@@ -11,6 +11,13 @@ interface LiveTargetProps {
   pointerCapture: boolean;
   pointerLocked: boolean;
   usingFrameFallback: boolean;
+  interactive?: boolean;
+  title?: string;
+  imageAlt?: string;
+  fit?: boolean;
+  zoomPercent?: number;
+  intrinsicWidth?: number | null;
+  intrinsicHeight?: number | null;
   onStreamError(): void;
   onStreamRecovered(): void;
   sendInput(command: GatewayInputCommand, recordAction?: boolean): Promise<boolean>;
@@ -25,6 +32,13 @@ export const LiveTarget = forwardRef<HTMLDivElement, LiveTargetProps>(function L
     pointerCapture,
     pointerLocked,
     usingFrameFallback,
+    interactive = true,
+    title = "Live target",
+    imageAlt = "Live target video",
+    fit = true,
+    zoomPercent = 100,
+    intrinsicWidth = null,
+    intrinsicHeight = null,
     onStreamError,
     onStreamRecovered,
     sendInput,
@@ -33,7 +47,13 @@ export const LiveTarget = forwardRef<HTMLDivElement, LiveTargetProps>(function L
 ) {
   const pendingRef = useRef({ dx: 0, dy: 0, wheel: 0 });
   const frameRequestRef = useRef<number | null>(null);
-  const active = claimed && mode === "human" && pointerCapture;
+  const active = interactive && claimed && mode === "human" && pointerCapture;
+  const naturalWidth = intrinsicWidth ?? 1280;
+  const naturalHeight = intrinsicHeight ?? 720;
+  const frameStyle: CSSProperties | undefined = fit ? undefined : {
+    width: `${Math.round(naturalWidth * zoomPercent / 100)}px`,
+    aspectRatio: `${naturalWidth} / ${naturalHeight}`,
+  };
 
   const flushPointer = useCallback(() => {
     frameRequestRef.current = null;
@@ -87,9 +107,9 @@ export const LiveTarget = forwardRef<HTMLDivElement, LiveTargetProps>(function L
   };
 
   return (
-    <section className="live-target" aria-labelledby="live-target-title">
+    <section className={`live-target ${interactive ? "" : "live-target--observation"}`} aria-labelledby="live-target-title">
       <div className="region-heading-row">
-        <h1 id="live-target-title">Live target</h1>
+        <h1 id="live-target-title">{title}</h1>
         <span className={`frame-transport ${live ? "frame-transport--live" : ""}`}>
           {live ? (usingFrameFallback ? "Live" : "Live") : "—"}
         </span>
@@ -98,6 +118,7 @@ export const LiveTarget = forwardRef<HTMLDivElement, LiveTargetProps>(function L
         <div
           ref={ref}
           className={`target-frame ${active ? "target-frame--capture" : ""} ${pointerLocked ? "target-frame--locked" : ""}`}
+          style={frameStyle}
           tabIndex={active ? 0 : -1}
           onMouseMove={onMouseMove}
           onMouseDown={(event) => onMouseButton(event, "down")}
@@ -106,14 +127,14 @@ export const LiveTarget = forwardRef<HTMLDivElement, LiveTargetProps>(function L
           onContextMenu={(event) => {
             if (active) event.preventDefault();
           }}
-          aria-label="Target display"
+          aria-label={interactive ? "Target display" : "Environmental camera display"}
         >
           {imageSource === null ? (
-            <div className="target-empty" aria-label="Target video unavailable">—</div>
+            <div className="target-empty" aria-label={`${title} unavailable`}>—</div>
           ) : (
             <img
               src={imageSource}
-              alt="Live target video"
+              alt={imageAlt}
               draggable={false}
               onLoad={() => {
                 if (!usingFrameFallback) onStreamRecovered();

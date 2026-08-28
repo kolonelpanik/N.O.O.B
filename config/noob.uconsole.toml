@@ -86,6 +86,29 @@ pixel_format = "MJPG"
 max_frame_bytes = 8192000
 validated = true
 
+# Populate the camera's assigned RFC1918 address and its separate bearer token,
+# then set enabled=true after firmware acceptance. Optional camera failure never
+# participates in the target HDMI/HID /readyz decision.
+[environment_camera]
+enabled = false
+# host = "192.168.50.84"
+# expected_device_id = "cam_0123456789abcdef"
+port = 80
+# token_file = "/etc/noob/environment-camera.key"
+connect_timeout_seconds = 1.5
+request_timeout_seconds = 4.0
+stream_read_timeout_seconds = 10.0
+status_interval_seconds = 2.0
+reconnect_ms = 1000
+stale_seconds = 3.0
+max_frame_bytes = 2097152
+max_metadata_bytes = 65536
+max_media_bytes = 67108864
+max_clients = 2
+max_page_size = 50
+max_clip_seconds = 30
+max_clip_fps = 5
+
 [limits]
 max_body_bytes = 4096
 max_type_chars = 512

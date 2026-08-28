@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neveroutofbounds.example/schema/device-store-v2.json",
+  "title": "N.O.O.B. paired device store",
+  "description": "Canonical interoperable pairing metadata shared by the desktop operator and MCP plugin. This file contains public host keys and routing metadata, never private keys, passwords, bearer tokens, or control leases.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "default_device_id", "devices"],
+  "properties": {
+    "version": { "const": 2 },
+    "default_device_id": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^noob_[a-z0-9]{16,64}$" }
+      ]
+    },
+    "devices": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/device" }
+    }
+  },
+  "$defs": {
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device_id",
+        "profile_name",
+        "address",
+        "ssh_port",
+        "ssh_user",
+        "host_key_sha256",
+        "host_key_line",
+        "gateway_port",
+        "capabilities",
+        "created_at"
+      ],
+      "properties": {
+        "device_id": { "type": "string", "pattern": "^noob_[a-z0-9]{16,64}$" },
+        "profile_name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "address": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "ssh_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "ssh_user": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,31}$" },
+        "host_key_sha256": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$" },
+        "host_key_line": { "type": "string", "minLength": 32, "maxLength": 4096 },
+        "gateway_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9-]{1,48}$" }
+        },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

@@ -74,7 +74,23 @@ function mockBridge(initialStatus: GatewayStatus = gatewayStatus()): NoobBridge 
       gatewayLabel: "Test uConsole",
       streamUrl: "noob://gateway/stream",
       tokenConfigured: true,
+      connectionMode: "fixed" as const,
+      currentDeviceId: null,
     })),
+    listDevices: vi.fn(async () => ({ devices: [], currentDeviceId: null })),
+    discoverDevices: vi.fn(async () => ({ candidates: [] })),
+    probeDevice: vi.fn(async () => {
+      throw new Error("device discovery not configured in this controller test");
+    }),
+    inspectDevice: vi.fn(async () => {
+      throw new Error("device discovery not configured in this controller test");
+    }),
+    pairAndConnectDevice: vi.fn(async () => {
+      throw new Error("device discovery not configured in this controller test");
+    }),
+    connectKnownDevice: vi.fn(async () => {
+      throw new Error("device discovery not configured in this controller test");
+    }),
     bootstrapToken: vi.fn(async () => initialStatus),
     clearToken: vi.fn(async () => undefined),
     getStatus: vi.fn(async () => initialStatus),
@@ -156,6 +172,24 @@ function mockBridge(initialStatus: GatewayStatus = gatewayStatus()): NoobBridge 
       disarm_reason: null,
     })),
     disarmLocalInput: vi.fn(async () => localResult(LOCAL_READY)),
+    setEnvironmentCamera: vi.fn(async () => {
+      throw new Error("environment camera not configured in this controller test");
+    }),
+    captureEnvironmentSnapshot: vi.fn(async () => {
+      throw new Error("environment camera not configured in this controller test");
+    }),
+    listEnvironmentMedia: vi.fn(async () => {
+      throw new Error("environment camera not configured in this controller test");
+    }),
+    startEnvironmentClip: vi.fn(async () => {
+      throw new Error("environment camera not configured in this controller test");
+    }),
+    getEnvironmentClipJob: vi.fn(async () => {
+      throw new Error("environment camera not configured in this controller test");
+    }),
+    stopEnvironmentClip: vi.fn(async () => {
+      throw new Error("environment camera not configured in this controller test");
+    }),
     onControlLost: vi.fn(() => () => undefined),
   };
 }
@@ -197,6 +231,32 @@ describe("operator local-input ownership", () => {
       exclusive_grab: false,
     });
     expect(result.current.lastAction).toBe("uConsole input disarmed");
+    unmount();
+  });
+
+  it("does not report a local disarm until the returned device snapshot is released", async () => {
+    const armed = {
+      ...LOCAL_READY,
+      armed: true,
+      exclusive_grab: true,
+      disarm_reason: null,
+    };
+    const bridge = mockBridge(gatewayStatus(armed));
+    vi.mocked(bridge.disarmLocalInput).mockResolvedValueOnce(localResult(armed));
+    const { result, unmount } = await renderController(bridge);
+
+    let confirmed = true;
+    await act(async () => {
+      confirmed = await result.current.disarmLocalInput();
+    });
+
+    expect(confirmed).toBe(false);
+    expect(result.current.status?.local_input).toMatchObject({
+      armed: true,
+      exclusive_grab: true,
+    });
+    expect(result.current.localInputError).toBe("local_input_disarm_unconfirmed");
+    expect(result.current.lastAction).toBe("uConsole disarm unconfirmed");
     unmount();
   });
 
@@ -319,6 +379,64 @@ describe("operator local-input ownership", () => {
 
     expect(bridge.disarmLocalInput).toHaveBeenCalledOnce();
     expect(bridge.releaseAll).not.toHaveBeenCalled();
+    unmount();
+  });
+});
+
+describe("operator device adoption", () => {
+  it("installs the returned connection and refreshes authenticated state in place", async () => {
+    const initialStatus = gatewayStatus();
+    const adoptedStatus = gatewayStatus();
+    adoptedStatus.video = {
+      ...adoptedStatus.video,
+      generation: 11,
+      device: "/dev/noob-video-adopted",
+    };
+    const bridge = mockBridge(initialStatus);
+    vi.mocked(bridge.getStatus)
+      .mockResolvedValueOnce(initialStatus)
+      .mockResolvedValueOnce(adoptedStatus);
+    const { result, unmount } = await renderController(bridge);
+    const adoptedConfig = {
+      gatewayUrl: "http://127.0.0.1:23456",
+      gatewayLabel: "Paired uConsole",
+      streamUrl: "noob://gateway/stream",
+      tokenConfigured: true,
+      connectionMode: "ssh-tunnel" as const,
+      currentDeviceId: "noob_paired",
+    };
+
+    await act(() => result.current.adoptConnection(adoptedConfig));
+
+    expect(bridge.getStatus).toHaveBeenCalledTimes(2);
+    expect(result.current.config).toEqual(adoptedConfig);
+    expect(result.current.authenticated).toBe(true);
+    expect(result.current.connection).toBe("live");
+    expect(result.current.status?.video.device).toBe("/dev/noob-video-adopted");
+    expect(result.current.streamGeneration).toBe(11);
+    expect(result.current.lastAction).toBe("Device route changed");
+    unmount();
+  });
+
+  it("adopts an unauthenticated connection without probing it with stale credentials", async () => {
+    const bridge = mockBridge();
+    const { result, unmount } = await renderController(bridge);
+    const callsBeforeAdoption = vi.mocked(bridge.getStatus).mock.calls.length;
+
+    await act(() => result.current.adoptConnection({
+      gatewayUrl: "http://127.0.0.1:24567",
+      gatewayLabel: "Unprovisioned uConsole",
+      streamUrl: "noob://gateway/stream",
+      tokenConfigured: false,
+      connectionMode: "ssh-tunnel",
+      currentDeviceId: "noob_unprovisioned",
+    }));
+
+    expect(bridge.getStatus).toHaveBeenCalledTimes(callsBeforeAdoption);
+    expect(result.current.authenticated).toBe(false);
+    expect(result.current.connection).toBe("unauthenticated");
+    expect(result.current.authDialogOpen).toBe(true);
+    expect(result.current.status).toBeNull();
     unmount();
   });
 });

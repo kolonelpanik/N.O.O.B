@@ -10,6 +10,8 @@ const FALLBACK_CONFIG: GatewayConfigView = {
   gatewayLabel: "uConsole · 192.0.2.83",
   streamUrl: "",
   tokenConfigured: false,
+  connectionMode: "fixed",
+  currentDeviceId: null,
 };
 
 export class OperatorApiError extends Error {
@@ -64,6 +66,30 @@ export const noobApi = {
     return guarded(() => bridge().getConfig());
   },
 
+  listDevices() {
+    return guarded(() => bridge().listDevices());
+  },
+
+  discoverDevices(timeoutMs = 2_000) {
+    return guarded(() => bridge().discoverDevices(timeoutMs));
+  },
+
+  probeDevice(address: string, sshPort = 22) {
+    return guarded(() => bridge().probeDevice(address, sshPort));
+  },
+
+  inspectDevice(candidateId: string) {
+    return guarded(() => bridge().inspectDevice(candidateId));
+  },
+
+  pairAndConnectDevice(candidateId: string, expectedFingerprint: string, profileName: string) {
+    return guarded(() => bridge().pairAndConnectDevice(candidateId, expectedFingerprint, profileName));
+  },
+
+  connectKnownDevice(deviceId: string) {
+    return guarded(() => bridge().connectKnownDevice(deviceId));
+  },
+
   bootstrapToken(token: string): Promise<GatewayStatus> {
     return guarded(() => bridge().bootstrapToken(token));
   },
@@ -76,8 +102,8 @@ export const noobApi = {
     return guarded(() => bridge().getStatus());
   },
 
-  frame() {
-    return guarded(() => bridge().getFrame());
+  frame(source: "target" | "environment" = "target") {
+    return guarded(() => bridge().getFrame(source));
   },
 
   videoModes() {
@@ -114,6 +140,30 @@ export const noobApi = {
 
   disarmLocalInput() {
     return guarded(() => bridge().disarmLocalInput());
+  },
+
+  setEnvironmentCamera(enabled: boolean, expectedGeneration: number) {
+    return guarded(() => bridge().setEnvironmentCamera(enabled, expectedGeneration));
+  },
+
+  captureEnvironmentSnapshot(expectedGeneration: number) {
+    return guarded(() => bridge().captureEnvironmentSnapshot(expectedGeneration));
+  },
+
+  listEnvironmentMedia(limit = 20, cursor?: string) {
+    return guarded(() => bridge().listEnvironmentMedia(limit, cursor));
+  },
+
+  startEnvironmentClip(durationSeconds: number, fps: number, expectedGeneration: number) {
+    return guarded(() => bridge().startEnvironmentClip(durationSeconds, fps, expectedGeneration));
+  },
+
+  getEnvironmentClipJob(jobId: string) {
+    return guarded(() => bridge().getEnvironmentClipJob(jobId));
+  },
+
+  stopEnvironmentClip(jobId: string) {
+    return guarded(() => bridge().stopEnvironmentClip(jobId));
   },
 
   onControlLost(listener: (reason: string) => void): () => void {

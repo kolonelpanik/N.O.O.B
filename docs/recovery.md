@@ -1,5 +1,21 @@
 # Recovery
 
+## Appliance discovery unavailable or stale
+
+Discovery is not a control-plane dependency. If `_noob-kvm._tcp` is absent,
+use the known private/link-local uConsole address and SSH port manually, then
+perform the same independent host-key comparison. Check
+`noob-discovery.service`, `avahi-daemon.service`, and the configured port in
+`/etc/default/noob-discovery`; do not expose the loopback gateway directly or
+weaken SSH to make discovery succeed.
+
+The publisher preflight refuses a missing, changed, or loopback-only SSH
+listener. Restore and independently validate SSH first, then restart the
+publisher. For an immediate safe rollback, run
+`systemctl disable --now noob-discovery.service`; this does not stop SSH, the
+gateway, target HID/video, the local console, or the camera's distinct
+`_noobcam._tcp` advertisement.
+
 ## Emergency input release
 
 Use the authenticated `POST /api/v1/release-all` endpoint. It does not require
@@ -52,6 +68,35 @@ The local-control evdev readers reconnect after a device returns but remain
 disarmed. Re-authenticate and arm only after both stable links are ready. Never
 substitute `/dev/input/eventN`: those names can change across reboots or replugs
 and are rejected by configuration validation.
+
+## Environmental camera recovery
+
+Environmental-camera failure does not justify restarting, rebinding, or
+reconfiguring the target HDMI/HID lanes. Check its isolated object first:
+
+```bash
+curl --fail --silent \
+  -H "Authorization: Bearer $NOOB_OPERATOR_TOKEN" \
+  http://127.0.0.1:8765/api/v1/environment-camera/status
+```
+
+Do not place the token in a persistent shell profile or diagnostic capture.
+Verify the root-owned configured IP, the distinct camera-token file mode, and
+the camera's current DHCP lease before changing configuration. The gateway does
+not follow redirects or accept a replacement URL from an API caller.
+
+After camera reboot, refresh status and use its new public generation. Never
+replay a state/snapshot/clip mutation with a stale generation or retry a timed
+out storage mutation blindly. A clip job can have completed even if its HTTP
+reply was lost; list opaque media IDs before deciding whether to submit again.
+For a known active clip, the exact empty-body job stop route is idempotent;
+poll until `cancelled` rather than assuming the initial `cancelling` response
+proves partial storage cleanup.
+
+If streaming is disabled, storage may remain reachable. If camera power is
+removed, both management and storage are unavailable until 5 V returns. The
+reference arrangement reports `power_control=false`; software cannot restore
+electrical power after a physical power loss.
 
 ## Wiring recovery
 

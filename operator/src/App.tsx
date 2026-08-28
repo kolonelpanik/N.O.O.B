@@ -1,19 +1,28 @@
-import { useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ProofTone } from "./state/proof";
 import { AgentChannel } from "./components/AgentChannel";
 import { AppShell, type HeaderSignal } from "./components/AppShell";
 import { ControlOwnership } from "./components/ControlOwnership";
 import { CaptureOutputControl } from "./components/CaptureOutputControl";
+import { DevicePicker } from "./components/DevicePicker";
 import { EmergencyRelease } from "./components/EmergencyRelease";
+import { EnvironmentCameraPanel } from "./components/EnvironmentCameraPanel";
 import { InputControls } from "./components/InputControls";
 import { LiveTarget } from "./components/LiveTarget";
 import { LocalInputControl } from "./components/LocalInputControl";
+import { MediaToolbar } from "./components/MediaToolbar";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { ProofRail } from "./components/ProofRail";
+import { SourceTabs, type VideoSource } from "./components/SourceTabs";
 import { TokenBootstrap } from "./components/TokenBootstrap";
+import { OperatorApiError } from "./api/noob-client";
+import { useEnvironmentCamera } from "./hooks/useEnvironmentCamera";
 import { useFrameFeed } from "./hooks/useFrameFeed";
 import { useOperatorController } from "./hooks/useOperatorController";
+import { saveCurrentGatewayFrame } from "./media/save-current-frame";
 import { deriveProofModules } from "./state/proof";
+import { releaseTargetBeforeObservation } from "./state/source-safety";
+import type { GatewayConfigView } from "../shared/gateway-contract";
 
 function dynamicSignal(
   label: string,
@@ -33,13 +42,108 @@ function dynamicSignal(
 
 export default function App() {
   const operator = useOperatorController();
+  const adoptConnection = operator.adoptConnection;
   const targetRef = useRef<HTMLDivElement>(null);
-  const frame = useFrameFeed(
-    operator.authenticated && operator.status?.video.ready === true,
-    operator.config.streamUrl,
-    operator.streamGeneration,
-    operator.status?.video.viewers ?? null,
+  const mediaWorkspaceRef = useRef<HTMLDivElement>(null);
+  const [source, setSource] = useState<VideoSource>("target");
+  const [deviceDialogOpen, setDeviceDialogOpen] = useState(false);
+  const [sourceBusy, setSourceBusy] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [fit, setFit] = useState(true);
+  const [zoomPercent, setZoomPercent] = useState(100);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
+  const environment = useEnvironmentCamera(
+    operator.authenticated,
+    operator.status?.environment_camera,
   );
+  const environmentReady = environment.camera?.frame_ready === true;
+  const streamReady = source === "target"
+    ? operator.status?.video.ready === true
+    : environmentReady;
+  const streamUrl = source === "target"
+    ? operator.config.streamUrl
+    : "noob://gateway/environment-stream";
+  const streamGeneration = source === "target"
+    ? operator.streamGeneration
+    : environment.camera?.generation ?? 0;
+  const viewerCount = source === "target"
+    ? operator.status?.video.viewers ?? null
+    : environment.camera?.viewers ?? null;
+  const frame = useFrameFeed(
+    operator.authenticated && streamReady,
+    streamUrl,
+    streamGeneration,
+    viewerCount,
+    source,
+  );
+
+  useEffect(() => {
+    const update = () => setFullscreen(document.fullscreenElement === mediaWorkspaceRef.current);
+    document.addEventListener("fullscreenchange", update);
+    return () => document.removeEventListener("fullscreenchange", update);
+  }, []);
+
+  const changeSource = useCallback(async (nextSource: VideoSource) => {
+    if (nextSource === source || sourceBusy) return;
+    setSourceBusy(true);
+    setSourceError(null);
+    try {
+      if (nextSource === "environment") {
+        const localInput = operator.status?.local_input;
+        const safe = await releaseTargetBeforeObservation(
+          {
+            claimed: operator.claimed,
+            localArmed: localInput?.armed === true || localInput?.exclusive_grab === true,
+          },
+          {
+            releaseRemote: operator.releaseControl,
+            disarmLocal: operator.disarmLocalInput,
+          },
+        );
+        if (!safe) {
+          setSourceError("Target input release was not confirmed. Environment view remains locked.");
+          return;
+        }
+      }
+      setSource(nextSource);
+      setFit(true);
+      setZoomPercent(100);
+    } finally {
+      setSourceBusy(false);
+    }
+  }, [operator, source, sourceBusy]);
+
+  const toggleFullscreen = useCallback(async () => {
+    try {
+      if (document.fullscreenElement === mediaWorkspaceRef.current) {
+        await document.exitFullscreen();
+      } else {
+        await mediaWorkspaceRef.current?.requestFullscreen();
+      }
+    } catch {
+      setSourceError("Fullscreen is unavailable in this window state.");
+    }
+  }, []);
+
+  const captureScreenshot = useCallback(async () => {
+    setSourceError(null);
+    if (screenshotBusy) return;
+    setScreenshotBusy(true);
+    try {
+      await saveCurrentGatewayFrame(source);
+    } catch (error) {
+      const code = error instanceof OperatorApiError ? error.code : "snapshot_unavailable";
+      setSourceError(code.replaceAll("_", " "));
+    } finally {
+      setScreenshotBusy(false);
+    }
+  }, [screenshotBusy, source]);
+
+  const adoptDeviceConnection = useCallback(async (nextConfig: GatewayConfigView) => {
+    await adoptConnection(nextConfig);
+    setDeviceDialogOpen(false);
+  }, [adoptConnection]);
 
   const signals = useMemo<HeaderSignal[]>(() => {
     const eyes = dynamicSignal(
@@ -90,31 +194,75 @@ export default function App() {
   );
 
   const workspace = (
-    <LiveTarget
-      ref={targetRef}
-      imageSource={frame.imageSource}
-      live={operator.connection === "live" && operator.status?.video.ready === true}
-      claimed={operator.claimed}
-      mode={operator.mode}
-      pointerCapture={operator.pointerCapture}
-      pointerLocked={operator.pointerLocked}
-      usingFrameFallback={frame.usingFrameFallback}
-      onStreamError={() => {
-        frame.markStreamFailed();
-        if (operator.claimed) void operator.releaseControl();
-      }}
-      onStreamRecovered={frame.resetStream}
-      sendInput={operator.sendInput}
-    />
+    <div ref={mediaWorkspaceRef} className="media-workspace">
+      <SourceTabs
+        source={source}
+        busy={sourceBusy}
+        environmentConfigured={environment.camera?.configured === true}
+        error={sourceError}
+        onChange={(nextSource) => void changeSource(nextSource)}
+      />
+      <MediaToolbar
+        fit={fit}
+        zoomPercent={zoomPercent}
+        fullscreen={fullscreen}
+        screenshotBusy={screenshotBusy}
+        screenshotDisabled={!streamReady}
+        onFit={() => {
+          setFit(true);
+          setZoomPercent(100);
+        }}
+        onZoomOut={() => {
+          setFit(false);
+          setZoomPercent((current) => Math.max(50, current - 25));
+        }}
+        onZoomIn={() => {
+          setFit(false);
+          setZoomPercent((current) => Math.min(200, fit ? 125 : current + 25));
+        }}
+        onScreenshot={() => void captureScreenshot()}
+        onFullscreen={() => void toggleFullscreen()}
+      />
+      <div className="media-display">
+        <LiveTarget
+          ref={targetRef}
+          imageSource={frame.imageSource}
+          live={operator.connection === "live" && streamReady}
+          claimed={source === "target" && !sourceBusy && operator.claimed}
+          mode={operator.mode}
+          pointerCapture={source === "target" && operator.pointerCapture}
+          pointerLocked={source === "target" && operator.pointerLocked}
+          usingFrameFallback={frame.usingFrameFallback}
+          interactive={source === "target"}
+          title={source === "target" ? "Live target" : "Environmental camera · non-target"}
+          imageAlt={source === "target" ? "Live target video" : "Live environmental camera video"}
+          fit={fit}
+          zoomPercent={zoomPercent}
+          intrinsicWidth={source === "target" ? operator.status?.video.width : environment.camera?.width}
+          intrinsicHeight={source === "target" ? operator.status?.video.height : environment.camera?.height}
+          onStreamError={() => {
+            frame.markStreamFailed();
+            if (source === "target" && operator.claimed) void operator.releaseControl();
+          }}
+          onStreamRecovered={frame.resetStream}
+          sendInput={operator.sendInput}
+        />
+      </div>
+    </div>
   );
 
   const controlRail = (
     <div className="control-stack">
       <div className="control-stack__scroll">
+        {source === "environment" ? (
+          <EnvironmentCameraPanel controller={environment} />
+        ) : (
+          <>
         <ControlOwnership
           authenticated={operator.authenticated}
           claimed={operator.claimed}
           claimBlocked={
+            sourceBusy ||
             operator.localInputBusy ||
             operator.status?.local_input.armed === true ||
             operator.status?.local_input.exclusive_grab === true
@@ -172,6 +320,8 @@ export default function App() {
           lastAction={operator.lastAction}
           sendInput={operator.sendInput}
         />
+          </>
+        )}
       </div>
       <EmergencyRelease
         enabled={operator.authenticated}
@@ -188,7 +338,14 @@ export default function App() {
         workspace={workspace}
         controlRail={controlRail}
         proofRail={<ProofRail modules={proofModules} />}
+        onDevices={() => setDeviceDialogOpen(true)}
         onSettings={() => operator.setAuthDialogOpen(true)}
+      />
+      <DevicePicker
+        open={deviceDialogOpen}
+        currentConfig={operator.config}
+        onClose={() => setDeviceDialogOpen(false)}
+        onConnected={adoptDeviceConnection}
       />
       <TokenBootstrap
         open={operator.authDialogOpen}

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "noob": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/main.js", "--stdio"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    }
+  }
+}
