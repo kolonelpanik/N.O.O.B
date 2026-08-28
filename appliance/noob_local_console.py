@@ -859,13 +859,15 @@ def fullscreen_geometry(screen_width: int, screen_height: int) -> str:
 
 
 def window_covers_screen(root: Any, *, tolerance: int = 3) -> bool:
-    """Verify the mapped client area covers the physical screen edge to edge."""
+    """Verify a viewable client area covers the physical screen edge to edge."""
 
     root.update_idletasks()
     screen_width = int(root.winfo_screenwidth())
     screen_height = int(root.winfo_screenheight())
     return bool(
-        abs(int(root.winfo_rootx())) <= tolerance
+        bool(root.winfo_ismapped())
+        and bool(root.winfo_viewable())
+        and abs(int(root.winfo_rootx())) <= tolerance
         and abs(int(root.winfo_rooty())) <= tolerance
         and abs(int(root.winfo_width()) - screen_width) <= tolerance
         and abs(int(root.winfo_height()) - screen_height) <= tolerance
@@ -988,13 +990,6 @@ class FullscreenController:
         self.root.update_idletasks()
         self.normal_geometry = str(self.root.geometry())
         self.active = True
-        commands = xfce_fullscreen_commands(
-            int(self.root.winfo_id()),
-            int(self.root.winfo_screenwidth()),
-            int(self.root.winfo_screenheight()),
-            enabled=True,
-        )
-        run_wm_commands(commands, runner=self.command_runner)
         # Re-map the window after changing override-redirect.  XFCE otherwise
         # may keep the old decorated frame and its panel work-area constraint.
         self.root.withdraw()
@@ -1018,6 +1013,13 @@ class FullscreenController:
             int(self.root.winfo_screenwidth()), int(self.root.winfo_screenheight())
         )
         self.root.geometry(geometry)
+        # Flush Tk's queued withdraw/deiconify transition before asking X11 to
+        # map the window.  If the external map runs first, XFCE can apply Tk's
+        # pending unmap afterward and leave a correctly sized but invisible
+        # toplevel.  Repeating these calls is safe during verification retries.
+        self.root.deiconify()
+        self.root.state("normal")
+        self.root.update_idletasks()
         run_wm_commands(
             xfce_fullscreen_commands(
                 int(self.root.winfo_id()),
@@ -1044,6 +1046,9 @@ class FullscreenController:
         self.root.attributes("-topmost", topmost)
         self.root.deiconify()
         self.root.state("normal")
+        # Preserve the same ordering when restoring the decorated window: Tk
+        # settles its state first and xdotool performs the final idempotent map.
+        self.root.update_idletasks()
         run_wm_commands(
             xfce_fullscreen_commands(
                 int(self.root.winfo_id()),

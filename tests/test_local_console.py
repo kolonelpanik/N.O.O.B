@@ -723,10 +723,16 @@ class LocalConsoleContractTests(unittest.TestCase):
                 self.height = 680
                 self.x = 90
                 self.y = 18
+                self.mapped = True
+                self.pending_unmap = False
                 self.calls = []
 
             def update_idletasks(self):
                 self.calls.append(("update",))
+                if self.pending_unmap:
+                    self.mapped = False
+                    self.pending_unmap = False
+                    self.calls.append(("flush-unmap",))
 
             def geometry(self, value=None):
                 if value is None:
@@ -743,9 +749,12 @@ class LocalConsoleContractTests(unittest.TestCase):
 
             def withdraw(self):
                 self.calls.append(("withdraw",))
+                self.mapped = False
+                self.pending_unmap = True
 
             def deiconify(self):
                 self.calls.append(("deiconify",))
+                self.mapped = True
 
             def state(self, value):
                 self.calls.append(("state", value))
@@ -783,11 +792,20 @@ class LocalConsoleContractTests(unittest.TestCase):
             def winfo_height(self):
                 return self.height
 
+            def winfo_ismapped(self):
+                return self.mapped
+
+            def winfo_viewable(self):
+                return self.mapped
+
         root = FakeRoot()
         wm_calls = []
 
         def wm_runner(command, **_kwargs):
             wm_calls.append(command)
+            root.calls.append(("wm", *command))
+            if command[:2] == ("/usr/bin/xdotool", "windowmap"):
+                root.mapped = True
             return subprocess.CompletedProcess(command, 0)
 
         controller = MODULE.FullscreenController(root, command_runner=wm_runner)
@@ -811,11 +829,27 @@ class LocalConsoleContractTests(unittest.TestCase):
             ("/usr/bin/xdotool", "windowmap", "--sync", str(0x1234)),
             wm_calls,
         )
+        self.assertLess(
+            root.calls.index(("flush-unmap",)),
+            root.calls.index(
+                (
+                    "wm",
+                    "/usr/bin/xdotool",
+                    "windowmap",
+                    "--sync",
+                    str(0x1234),
+                )
+            ),
+        )
+        root.mapped = False
+        self.assertFalse(MODULE.window_covers_screen(root))
+        root.mapped = True
 
         controller.exit(topmost=False)
         self.assertIn(("override", False), root.calls)
         self.assertEqual(root.geometry_value, "1100x680+90+18")
         self.assertIn(("attribute", "-topmost", False), root.calls)
+        self.assertTrue(root.mapped)
         self.assertIn(
             (
                 "/usr/bin/wmctrl",
