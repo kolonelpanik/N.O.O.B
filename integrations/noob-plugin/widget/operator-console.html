@@ -16,37 +16,101 @@
         <div class="proof" id="proof">OBSERVE ONLY</div>
       </header>
 
-      <nav class="tabs" aria-label="Video source">
-        <button class="tab tab--active" data-source="target" type="button">TARGET</button>
-        <button class="tab" data-source="environment" type="button">ENVIRONMENT</button>
+      <nav class="primary-tabs" aria-label="Operator console view" role="tablist">
+        <button class="view-tab view-tab--active" data-view="live" id="live-tab" type="button" role="tab" aria-controls="live-view" aria-selected="true">LIVE</button>
+        <button class="view-tab" data-view="storage" id="storage-tab" type="button" role="tab" aria-controls="storage-view" aria-selected="false">STORAGE</button>
+        <button class="view-tab" data-view="health" id="health-tab" type="button" role="tab" aria-controls="health-view" aria-selected="false">HEALTH</button>
         <span class="spacer"></span>
-        <button id="zoom-out" class="utility" type="button" aria-label="Zoom out">−</button>
-        <button id="zoom-label" class="utility utility--wide" type="button">FIT</button>
-        <button id="zoom-in" class="utility" type="button" aria-label="Zoom in">+</button>
         <button id="fullscreen" class="utility utility--wide" type="button">FULLSCREEN</button>
       </nav>
 
-      <section class="stage" id="stage" aria-label="N.O.O.B. live view">
-        <img id="frame" alt="N.O.O.B. live video frame" draggable="false" />
-        <div id="empty" class="empty">CONNECT A PAIRED DEVICE TO BEGIN</div>
-        <div class="source-badge" id="source-badge">TARGET HDMI</div>
+      <section class="view view--live" id="live-view" role="tabpanel" aria-labelledby="live-tab">
+        <nav class="source-tabs" aria-label="Video source">
+          <button class="source-tab source-tab--active" data-source="target" type="button">TARGET</button>
+          <button class="source-tab" data-source="environment" type="button">ENVIRONMENT</button>
+          <span class="spacer"></span>
+          <button id="zoom-out" class="utility" type="button" aria-label="Zoom out">−</button>
+          <button id="zoom-label" class="utility utility--wide" type="button">FIT</button>
+          <button id="zoom-in" class="utility" type="button" aria-label="Zoom in">+</button>
+        </nav>
+
+        <section class="stage" id="stage" aria-label="N.O.O.B. live view">
+          <img id="frame" alt="N.O.O.B. live video frame" draggable="false" hidden />
+          <div id="empty" class="empty">CONNECT A PAIRED DEVICE TO BEGIN</div>
+          <div class="source-badge" id="source-badge">TARGET HDMI</div>
+        </section>
+
+        <section class="telemetry" aria-label="Live proof summary">
+          <div><span>GATEWAY</span><strong id="gateway-state">—</strong></div>
+          <div><span>FRAME</span><strong id="frame-state">—</strong></div>
+          <div><span>CAMERA</span><strong id="camera-state">OPTIONAL</strong></div>
+          <div><span>STORAGE</span><strong id="storage-state">—</strong></div>
+        </section>
+
+        <section class="actions">
+          <button id="refresh" type="button">REFRESH FRAME</button>
+          <button id="camera-toggle" type="button" disabled>CAMERA STREAM</button>
+          <button id="screenshot" type="button" disabled>DOWNLOAD FRESH TARGET JPEG</button>
+          <button id="release" class="danger" type="button">EMERGENCY RELEASE</button>
+        </section>
       </section>
 
-      <section class="telemetry">
-        <div><span>GATEWAY</span><strong id="gateway-state">—</strong></div>
-        <div><span>FRAME</span><strong id="frame-state">—</strong></div>
-        <div><span>CAMERA</span><strong id="camera-state">OPTIONAL</strong></div>
-        <div><span>STORAGE</span><strong id="storage-state">—</strong></div>
+      <section class="view view--storage" id="storage-view" role="tabpanel" aria-labelledby="storage-tab" hidden>
+        <header class="view-heading">
+          <div>
+            <span class="eyebrow">ENVIRONMENT CAMERA</span>
+            <h1>microSD media</h1>
+            <p>Completed snapshots and bounded clips addressed only by opaque media ID.</p>
+          </div>
+          <button id="storage-refresh" class="panel-button" type="button">REFRESH MEDIA</button>
+        </header>
+        <div id="media-empty" class="panel-empty">OPEN STORAGE TO LOAD COMPLETED MEDIA</div>
+        <div id="media-list" class="media-list" aria-live="polite"></div>
+        <button id="media-more" class="panel-button media-more" type="button" hidden>LOAD MORE</button>
+
+        <section id="media-preview" class="media-preview" aria-label="Stored environmental camera media preview" hidden>
+          <header>
+            <div>
+              <span class="eyebrow" id="preview-kind">STORED MEDIA</span>
+              <strong id="preview-id">—</strong>
+            </div>
+            <button id="preview-close" class="utility" type="button" aria-label="Close media preview">×</button>
+          </header>
+          <div class="preview-stage">
+            <img id="preview-image" alt="Stored environmental camera media" />
+          </div>
+          <footer class="preview-footer">
+            <span id="preview-meta">—</span>
+            <span class="preview-controls" id="preview-controls" hidden>
+              <button id="preview-previous" class="panel-button" type="button">PREVIOUS FRAME</button>
+              <strong id="preview-frame">1 / 1</strong>
+              <button id="preview-next" class="panel-button" type="button">NEXT FRAME</button>
+            </span>
+          </footer>
+        </section>
       </section>
 
-      <section class="actions">
-        <button id="refresh" type="button">REFRESH FRAME</button>
-        <button id="camera-toggle" type="button" disabled>CAMERA STREAM</button>
-        <button id="screenshot" type="button" disabled>SAVE SCREENSHOT</button>
-        <button id="release" class="danger" type="button">EMERGENCY RELEASE</button>
+      <section class="view view--health" id="health-view" role="tabpanel" aria-labelledby="health-tab" hidden>
+        <header class="view-heading">
+          <div>
+            <span class="eyebrow">INDEPENDENT PROOF LAYERS</span>
+            <h1>Appliance health</h1>
+            <p>Transport, video, camera, storage, and ownership remain separate acceptance signals.</p>
+          </div>
+          <button id="health-refresh" class="panel-button" type="button">REFRESH HEALTH</button>
+        </header>
+        <dl class="health-grid">
+          <div><dt>GATEWAY</dt><dd id="health-gateway">—</dd></div>
+          <div><dt>TARGET VIDEO</dt><dd id="health-video">—</dd></div>
+          <div><dt>UART / PICO</dt><dd id="health-serial">—</dd></div>
+          <div><dt>INPUT OWNERSHIP</dt><dd id="health-control">—</dd></div>
+          <div><dt>ENVIRONMENT CAMERA</dt><dd id="health-camera">—</dd></div>
+          <div><dt>CAMERA STORAGE</dt><dd id="health-storage">—</dd></div>
+        </dl>
+        <p class="health-note">A ready transport does not prove a target-visible effect. Input stays observe-only until fresh target-frame proof and bounded control are acquired outside this view.</p>
       </section>
 
-      <footer>
+      <footer class="app-footer">
         <span id="message">No automatic recording · Target acceptance requires a newer visual frame</span>
         <span id="device">NO DEVICE</span>
       </footer>

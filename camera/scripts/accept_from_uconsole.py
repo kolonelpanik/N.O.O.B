@@ -67,7 +67,14 @@ CAMERA_FIELDS: Final = {
     "fresh",
     "last_error",
 }
-SENSOR_FIELDS: Final = {"detected", "name", "pid", "ov2640_verified"}
+SENSOR_FIELDS: Final = {
+    "detected",
+    "name",
+    "pid",
+    "ov2640_verified",
+    "supported_sensor_verified",
+}
+SUPPORTED_SENSORS: Final = {("OV2640", 0x26), ("OV3660", 0x3660)}
 PSRAM_FIELDS: Final = {"initialized", "size_bytes"}
 DUMMY_BEARER: Final = "noob_acceptance_invalid_token_00000000"
 DUMMY_QUERY: Final = "noob_acceptance_query_dummy"
@@ -356,15 +363,17 @@ def validate_ready_camera(camera: dict[str, object]) -> None:
     sensor = camera["sensor"]
     psram = camera["psram"]
     assert isinstance(sensor, dict) and isinstance(psram, dict)
+    identity = (sensor.get("name"), sensor.get("pid"))
+    ov2640_identity = identity == ("OV2640", 0x26)
     if (
         camera.get("configured_pinmap") != "ai_thinker_candidate"
         or camera.get("pinmap_verified") is not True
         or camera.get("enabled") is not True
         or camera.get("initialized") is not True
         or sensor.get("detected") is not True
-        or sensor.get("name") != "OV2640"
-        or sensor.get("pid") != 38
-        or sensor.get("ov2640_verified") is not True
+        or identity not in SUPPORTED_SENSORS
+        or sensor.get("supported_sensor_verified") is not True
+        or sensor.get("ov2640_verified") is not ov2640_identity
         or psram.get("initialized") is not True
         or _integer(psram.get("size_bytes"), "psram_size", 1) <= 0
         or camera.get("width") != 640

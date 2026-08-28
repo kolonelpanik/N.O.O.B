@@ -544,6 +544,8 @@ esp_err_t ApiServer::status_handler(httpd_req_t *request) {
         cJSON_AddNumberToObject(sensor, "pid", camera.sensor.pid);
     }
     cJSON_AddBoolToObject(sensor, "ov2640_verified", camera.sensor.ov2640_verified);
+    cJSON_AddBoolToObject(sensor, "supported_sensor_verified",
+                          camera.sensor.supported_sensor_verified);
     cJSON *psram = cJSON_AddObjectToObject(camera_json, "psram");
     cJSON_AddBoolToObject(psram, "initialized", camera.psram.initialized);
     cJSON_AddNumberToObject(psram, "size_bytes",

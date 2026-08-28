@@ -35,6 +35,13 @@ Messages remain bounded and never contain a local path or underlying secret.
 `pinmap_verified`, the detected sensor PID/name, PSRAM result, logical enable
 state, generation, frame sequence, frame age, and freshness.
 
+Sensor evidence is deliberately model-specific and model-neutral at the same
+time. The detected `name`/`pid` pair must be exactly `OV2640`/`0x26` or
+`OV3660`/`0x3660`, and `supported_sensor_verified` is true only for one of those
+allowlisted pairs. The retained `ov2640_verified` field is true only for the
+OV2640 pair and is always false for OV3660. Unknown sensors remain observable
+in status but cannot set `pinmap_verified`, serve frames, or pass acceptance.
+
 State mutation is generation checked:
 
 ```http

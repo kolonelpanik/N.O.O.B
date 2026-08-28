@@ -35,8 +35,11 @@
   },
   "camera_state": {
     "configured_pinmap": "ai_thinker_candidate",
-    "required_sensor_pid": 38,
-    "required_sensor_name": "OV2640",
+    "supported_sensors": [
+      {"name": "OV2640", "pid": 38},
+      {"name": "OV3660", "pid": 13920}
+    ],
+    "sensor_verification_field": "supported_sensor_verified",
     "baseline_pixel_format": "jpeg",
     "baseline_width": 640,
     "baseline_height": 480,
@@ -162,6 +165,7 @@
   "response_fields": {
     "health": ["api", "status", "device_id", "boot_id", "uptime_ms", "components"],
     "status": ["api", "device_id", "boot_id", "uptime_ms", "firmware", "provisioning", "wifi", "camera", "storage", "reset_reason", "heap"],
+    "camera_sensor": ["detected", "name", "pid", "ov2640_verified", "supported_sensor_verified"],
     "storage": ["state", "mounted", "writable", "total_bytes", "free_bytes", "reserve_bytes", "media_count", "active_job_id", "limits", "last_error"],
     "media_item": ["id", "kind", "state", "created_at", "created_uptime_ms", "size_bytes", "width", "height", "frame_count", "fps", "duration_ms", "content_type"],
     "job": ["job_id", "kind", "state", "created_uptime_ms", "frames_written", "frames_target", "media_id", "error_code"],

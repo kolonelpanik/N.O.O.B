@@ -22,6 +22,21 @@ const media: EnvironmentCameraMediaItem = {
   content_type: "image/jpeg",
 };
 
+const clip: EnvironmentCameraMediaItem = {
+  id: `m_${"c".repeat(32)}`,
+  kind: "clip",
+  state: "complete",
+  created_at: "2026-08-27T19:01:00Z",
+  created_uptime_ms: 2,
+  size_bytes: 4096,
+  width: 640,
+  height: 480,
+  frame_count: 3,
+  fps: 1,
+  duration_ms: 3000,
+  content_type: "application/vnd.noob.clip+json",
+};
+
 const camera: EnvironmentCameraStatus = {
   configured: true,
   reachable: true,
@@ -118,6 +133,34 @@ describe("EnvironmentCameraPanel", () => {
       "src",
       `noob://gateway/environment-media/${media.id}`,
     );
+    expect(screen.queryByRole("button", { name: /delete|format/i })).not.toBeInTheDocument();
+  });
+
+  it("navigates every stored clip frame through bounded opaque-ID routes", () => {
+    render(<EnvironmentCameraPanel controller={controller({ media: [clip] })} />);
+    fireEvent.click(screen.getByRole("button", { name: /3s clip/i }));
+
+    const firstFrame = screen.getByAltText("Frame 1 from stored environmental camera clip");
+    expect(firstFrame).toHaveAttribute(
+      "src",
+      `noob://gateway/environment-media/${clip.id}/frames/0`,
+    );
+    expect(screen.getByRole("button", { name: "Previous stored clip frame" })).toBeDisabled();
+
+    const next = screen.getByRole("button", { name: "Next stored clip frame" });
+    fireEvent.click(next);
+    expect(screen.getByAltText("Frame 2 from stored environmental camera clip")).toHaveAttribute(
+      "src",
+      `noob://gateway/environment-media/${clip.id}/frames/1`,
+    );
+    fireEvent.click(next);
+    expect(screen.getByAltText("Frame 3 from stored environmental camera clip")).toHaveAttribute(
+      "src",
+      `noob://gateway/environment-media/${clip.id}/frames/2`,
+    );
+    expect(next).toBeDisabled();
+    fireEvent.click(next);
+    expect(screen.queryByAltText("Frame 4 from stored environmental camera clip")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /delete|format/i })).not.toBeInTheDocument();
   });
 });

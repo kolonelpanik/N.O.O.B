@@ -40,8 +40,9 @@ esp_err_t start_api_after_ip(void *) {
 
     // Do not bless a pending OTA image merely because the management plane came
     // up. The diagnostic probe must also have observed the configured pin map,
-    // OV2640 identity, PSRAM, and one bounded marker-valid JPEG. SD remains an
-    // optional/degraded subsystem and is intentionally not an OTA validity gate.
+    // allowlisted sensor identity, PSRAM, and one bounded marker-valid JPEG.
+    // SD remains an optional/degraded subsystem and is intentionally not an
+    // OTA validity gate.
     if (camera == nullptr || !camera->status().pinmap_verified) {
         ESP_LOGW(kTag,
                  "Pending OTA image remains unconfirmed because the camera "

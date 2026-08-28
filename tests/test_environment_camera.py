@@ -78,6 +78,7 @@ class FakeCameraUpstream:
         self.sensor_name = "OV2640"
         self.sensor_pid = 0x26
         self.ov2640_verified = True
+        self.supported_sensor_verified = True
         self.psram_initialized = True
         self.psram_size_bytes = 4 * 1024 * 1024
         self.provisioned = True
@@ -122,6 +123,7 @@ class FakeCameraUpstream:
                         "name": self.sensor_name,
                         "pid": self.sensor_pid,
                         "ov2640_verified": self.ov2640_verified,
+                        "supported_sensor_verified": self.supported_sensor_verified,
                     },
                     "psram": {
                         "initialized": self.psram_initialized,
@@ -341,6 +343,7 @@ class EnvironmentCameraTests(unittest.IsolatedAsyncioTestCase):
                 "name": "OV2640",
                 "pid": 0x26,
                 "ov2640_verified": True,
+                "supported_sensor_verified": True,
             },
         )
         self.assertEqual(status["psram"]["size_bytes"], 4 * 1024 * 1024)
@@ -351,6 +354,45 @@ class EnvironmentCameraTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(disabled["generation"], 8)
         with self.assertRaises(EnvironmentCameraGenerationConflict):
             await self.camera.set_enabled(True, 7)
+
+    async def test_ov3660_is_supported_without_claiming_ov2640(self):
+        self.upstream.sensor_name = "OV3660"
+        self.upstream.sensor_pid = 0x3660
+        self.upstream.ov2640_verified = False
+
+        status = await self.camera.refresh_status()
+
+        self.assertTrue(status["hardware_verified"])
+        self.assertEqual(
+            status["sensor"],
+            {
+                "detected": True,
+                "name": "OV3660",
+                "pid": 0x3660,
+                "ov2640_verified": False,
+                "supported_sensor_verified": True,
+            },
+        )
+
+    async def test_sensor_identity_and_verification_flags_are_strict(self):
+        self.upstream.sensor_name = "OV3660"
+        self.upstream.sensor_pid = 0x3660
+        self.upstream.ov2640_verified = True
+        with self.assertRaisesRegex(
+            EnvironmentCameraError, "camera_v1_contract_mismatch"
+        ):
+            await self.camera.refresh_status()
+
+        self.upstream.ov2640_verified = False
+        self.upstream.sensor_name = "UNKNOWN"
+        self.upstream.sensor_pid = 0x1234
+        self.upstream.supported_sensor_verified = False
+        self.upstream.pinmap_verified = False
+        self.upstream.enabled = False
+        self.upstream.initialized = False
+        status = await self.camera.refresh_status()
+        self.assertFalse(status["hardware_verified"])
+        self.assertFalse(status["sensor"]["supported_sensor_verified"])
 
     async def test_snapshot_frame_is_bounded_validated_and_cached(self):
         await self.camera.refresh_status()
@@ -507,6 +549,7 @@ class EnvironmentCameraTests(unittest.IsolatedAsyncioTestCase):
                 "name": "OV2640",
                 "pid": 0x26,
                 "ov2640_verified": True,
+                "supported_sensor_verified": True,
             },
             "psram": {"initialized": True, "size_bytes": 4 * 1024 * 1024},
             "width": 1600,
@@ -538,6 +581,7 @@ class EnvironmentCameraTests(unittest.IsolatedAsyncioTestCase):
                 "name": "OV2640",
                 "pid": 0x26,
                 "ov2640_verified": True,
+                "supported_sensor_verified": True,
             },
             "psram": {"initialized": True, "size_bytes": 4 * 1024 * 1024},
             "width": 640,

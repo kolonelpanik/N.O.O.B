@@ -20,6 +20,8 @@ It is an `interactive-decoupled` MCP App: the agent-facing tools and the mounted
 - A control session is released after at most five seconds without a validated HID action. An in-flight bounded action is not treated as idle, but it never extends the session's absolute deadline.
 - A UART acknowledgement proves transport only. A newer frame is required before claiming target-visible acceptance.
 - Media is addressed only by opaque IDs. There is no arbitrary path, shell, raw UART, delete-all, SD-format, or unbounded recording tool.
+- The widget honors its requested `live`, `storage`, or `health` view. Storage previews call only bounded MCP reads with validated opaque media IDs; the widget exposes no path, arbitrary URL, or delete surface.
+- A Target screenshot is a newly gateway-validated JPEG downloaded to the operator host. Only an explicit Environment screenshot is persisted to camera-owned microSD through `noob_save_screenshot`.
 - “Camera off” means sensor/stream disabled while the controller remains powered and reachable. Electrical 5V removal requires separate switchable hardware.
 
 ## Build and validate
@@ -113,7 +115,8 @@ HTTP mode refuses to start without its own bearer, binds only `127.0.0.1`, and c
 3. `noob_register_device` pins that identity.
 4. `noob_connect_device` opens the loopback SSH tunnel.
 5. `noob_get_status` and `noob_get_frame` establish current visual proof.
-6. Observation can continue indefinitely without a control lease.
+6. `noob_open_console` opens observe-only in its requested `live`, `storage`, or
+   `health` view. Observation can continue indefinitely without a control lease.
 7. `noob_list_media` and `noob_get_media` inspect camera-owned items;
    `noob_get_clip_frame` retrieves exactly one completed clip frame at a bounded
    `0..149` index through the fixed gateway route.

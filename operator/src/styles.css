@@ -923,6 +923,44 @@ select:disabled {
   background: #020405;
 }
 
+.media-preview__navigation {
+  display: grid;
+  grid-template-columns: minmax(110px, auto) minmax(0, 1fr) minmax(110px, auto);
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  background: #091014;
+  font: 550 10px/1.2 SFMono-Regular, ui-monospace, monospace;
+  text-align: center;
+}
+
+.media-preview__navigation button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid #31515a;
+  border-radius: 5px;
+  color: #cde8ea;
+  background: #101a1f;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.media-preview__navigation button:hover:not(:disabled) {
+  border-color: #3c777e;
+  background: #142228;
+}
+
+.media-preview__navigation button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .media-preview > p {
   margin: 0;
   padding: 11px 14px;

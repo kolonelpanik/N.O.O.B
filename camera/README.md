@@ -6,8 +6,9 @@ uConsole gateway, Electron operator, target HDMI capture, and Pico HID firmware.
 
 It has **not** been flashed to hardware by this change. The photographed module
 is treated as an AI-Thinker pin-map candidate, not as a verified AI-Thinker
-board. OV2640, working PSRAM, the candidate pins, the microSD slot, and the
-available 5 V power remain hardware acceptance gates.
+board. A supported sensor identity (OV2640 or OV3660), working PSRAM, the
+candidate pins, the microSD slot, and the available 5 V power remain hardware
+acceptance gates.
 
 ## Pinned baseline
 
@@ -33,7 +34,8 @@ The firmware does not make a product claim from a board name or silkscreen. It:
 1. proves the detected flash is exactly 4 MiB;
 2. probes PSRAM and refuses VGA product mode without it;
 3. attempts the documented AI-Thinker candidate pin map;
-4. reads the sensor PID and requires `OV2640_PID` (`0x26`);
+4. reads the sensor name/PID pair and requires exactly OV2640/`0x26` or
+   OV3660/`0x3660`;
 5. requires a bounded, marker-valid JPEG before setting `pinmap_verified=true`;
 6. exposes failures independently through authenticated status if Wi-Fi can run.
 
@@ -137,7 +139,7 @@ callers never provide filenames or paths.
 Source review or a successful host test does not prove:
 
 - the physical carrier's pins;
-- an OV2640 sensor;
+- an allowlisted OV2640 or OV3660 sensor identity;
 - PSRAM existence or stability;
 - SD pull-ups, card format, hot removal, or write endurance;
 - 5 V supply quality during simultaneous Wi-Fi/camera/SD activity;

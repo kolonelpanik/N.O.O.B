@@ -1,5 +1,7 @@
 import {
   Camera,
+  ChevronLeft,
+  ChevronRight,
   CircleStop,
   Film,
   FolderOpen,
@@ -37,16 +39,25 @@ function formatMediaTime(item: EnvironmentCameraMediaItem): string {
     : value.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function mediaPreviewUrl(item: EnvironmentCameraMediaItem): string {
+function boundedPreviewFrame(
+  item: EnvironmentCameraMediaItem,
+  requestedFrame: number,
+): number {
+  if (item.kind !== "clip" || !Number.isSafeInteger(requestedFrame)) return 0;
+  return Math.max(0, Math.min(requestedFrame, item.frame_count - 1, 149));
+}
+
+function mediaPreviewUrl(item: EnvironmentCameraMediaItem, frameIndex = 0): string {
   return item.kind === "snapshot"
     ? `noob://gateway/environment-media/${item.id}`
-    : `noob://gateway/environment-media/${item.id}/frames/0`;
+    : `noob://gateway/environment-media/${item.id}/frames/${boundedPreviewFrame(item, frameIndex)}`;
 }
 
 export function EnvironmentCameraPanel({ controller }: EnvironmentCameraPanelProps) {
   const [duration, setDuration] = useState(10);
   const [fps, setFps] = useState(3);
   const [preview, setPreview] = useState<EnvironmentCameraMediaItem | null>(null);
+  const [previewFrame, setPreviewFrame] = useState(0);
   const camera = controller.camera;
   const storage = controller.storage ?? camera?.storage ?? null;
   const recording = controller.activeJobId !== null;
@@ -154,7 +165,15 @@ export function EnvironmentCameraPanel({ controller }: EnvironmentCameraPanelPro
           {controller.media.length === 0 ? (
             <p className="media-empty">{controller.mediaBusy ? "Loading camera storage…" : "No stored camera media"}</p>
           ) : controller.media.slice(0, 6).map((item) => (
-            <button key={item.id} type="button" className="media-item" onClick={() => setPreview(item)}>
+            <button
+              key={item.id}
+              type="button"
+              className="media-item"
+              onClick={() => {
+                setPreviewFrame(0);
+                setPreview(item);
+              }}
+            >
               <img src={mediaPreviewUrl(item)} alt="" />
               <span>
                 <strong>{item.kind === "snapshot" ? "Snapshot" : `${item.duration_ms / 1000}s clip`}</strong>
@@ -179,10 +198,56 @@ export function EnvironmentCameraPanel({ controller }: EnvironmentCameraPanelPro
         <div className="media-preview-layer" role="dialog" aria-modal="true" aria-label="Stored environmental camera media">
           <div className="media-preview">
             <div className="media-preview__heading">
-              <span>{preview.kind === "snapshot" ? "Stored snapshot" : "Stored clip · first frame"}</span>
-              <button type="button" aria-label="Close media preview" onClick={() => setPreview(null)}><X size={18} /></button>
+              <span>
+                {preview.kind === "snapshot"
+                  ? "Stored snapshot"
+                  : `Stored clip · frame ${boundedPreviewFrame(preview, previewFrame) + 1} of ${preview.frame_count}`}
+              </span>
+              <button
+                type="button"
+                aria-label="Close media preview"
+                onClick={() => {
+                  setPreview(null);
+                  setPreviewFrame(0);
+                }}
+              >
+                <X size={18} />
+              </button>
             </div>
-            <img src={mediaPreviewUrl(preview)} alt={preview.kind === "snapshot" ? "Stored environmental camera snapshot" : "First frame from stored environmental camera clip"} />
+            <img
+              src={mediaPreviewUrl(preview, previewFrame)}
+              alt={
+                preview.kind === "snapshot"
+                  ? "Stored environmental camera snapshot"
+                  : `Frame ${boundedPreviewFrame(preview, previewFrame) + 1} from stored environmental camera clip`
+              }
+            />
+            {preview.kind === "clip" && (
+              <div className="media-preview__navigation" aria-label="Stored clip frame navigation">
+                <button
+                  type="button"
+                  aria-label="Previous stored clip frame"
+                  disabled={boundedPreviewFrame(preview, previewFrame) === 0}
+                  onClick={() => setPreviewFrame((current) => boundedPreviewFrame(preview, current - 1))}
+                >
+                  <ChevronLeft size={17} />
+                  Previous
+                </button>
+                <span>
+                  Frame {boundedPreviewFrame(preview, previewFrame) + 1} of {preview.frame_count}
+                  {preview.fps === null ? "" : ` · ${preview.fps} fps capture`}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Next stored clip frame"
+                  disabled={boundedPreviewFrame(preview, previewFrame) + 1 >= preview.frame_count}
+                  onClick={() => setPreviewFrame((current) => boundedPreviewFrame(preview, current + 1))}
+                >
+                  Next
+                  <ChevronRight size={17} />
+                </button>
+              </div>
+            )}
             <p>{formatMediaTime(preview)} · {preview.width} × {preview.height} · {formatBytes(preview.size_bytes)}</p>
           </div>
         </div>

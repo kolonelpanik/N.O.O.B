@@ -35,8 +35,8 @@ V1_FRAME_HEIGHT = 480
 V1_MAX_JPEG_BYTES = 256 * 1024
 V1_FRESH_FRAME_MAX_AGE_MS = 2000
 V1_CONFIGURED_PINMAP = "ai_thinker_candidate"
-V1_SENSOR_NAME = "OV2640"
-V1_SENSOR_PID = 0x26
+V1_SUPPORTED_SENSORS = frozenset({("OV2640", 0x26), ("OV3660", 0x3660)})
+V1_OV2640_IDENTITY = ("OV2640", 0x26)
 
 _STATUS_PATH = "/api/v1/status"
 _STATE_PATH = "/api/v1/camera/state"
@@ -216,15 +216,19 @@ def _status_evidence(
     ov2640_verified = _bounded_bool(
         sensor.get("ov2640_verified"), "sensor.ov2640_verified"
     )
+    supported_sensor_verified = _bounded_bool(
+        sensor.get("supported_sensor_verified"),
+        "sensor.supported_sensor_verified",
+    )
     if sensor_detected != (sensor_name is not None and sensor_pid is not None):
         raise EnvironmentCameraError("camera_v1_contract_mismatch", status=502)
-    sensor_verified = bool(
-        sensor_detected
-        and sensor_name == V1_SENSOR_NAME
-        and sensor_pid == V1_SENSOR_PID
-        and ov2640_verified
-    )
-    if ov2640_verified and not sensor_verified:
+    sensor_identity = (sensor_name, sensor_pid)
+    ov2640_identity = sensor_detected and sensor_identity == V1_OV2640_IDENTITY
+    identity_supported = sensor_detected and sensor_identity in V1_SUPPORTED_SENSORS
+    sensor_verified = bool(identity_supported and supported_sensor_verified)
+    if ov2640_verified != bool(ov2640_identity):
+        raise EnvironmentCameraError("camera_v1_contract_mismatch", status=502)
+    if supported_sensor_verified != bool(identity_supported):
         raise EnvironmentCameraError("camera_v1_contract_mismatch", status=502)
 
     psram = _object(camera.get("psram"))
@@ -316,6 +320,7 @@ def _status_evidence(
             "name": sensor_name,
             "pid": sensor_pid,
             "ov2640_verified": ov2640_verified,
+            "supported_sensor_verified": supported_sensor_verified,
         },
         "psram": {
             "initialized": psram_initialized,
@@ -549,6 +554,7 @@ class EnvironmentCamera:
                 "name": None,
                 "pid": None,
                 "ov2640_verified": False,
+                "supported_sensor_verified": False,
             },
             "psram": {"initialized": False, "size_bytes": 0},
             "hardware_verified": False,

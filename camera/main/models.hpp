@@ -19,7 +19,12 @@ struct SensorStatus {
     bool detected{false};
     std::string name;
     std::uint32_t pid{0};
+    // Retained as model-specific evidence for v1 clients. This must never be
+    // true for an OV3660 (or any other sensor).
     bool ov2640_verified{false};
+    // Model-neutral product gate. The name/PID pair remains separately
+    // reported so callers can distinguish every allowlisted sensor.
+    bool supported_sensor_verified{false};
 };
 
 struct PsramStatus {

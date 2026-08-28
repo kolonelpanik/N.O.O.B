@@ -15,7 +15,10 @@ full, hashed flash backup before the first firmware write.
 
 ## Camera
 
-- Record actual sensor PID/name. Require PID `0x26` before saying OV2640.
+- Record the actual sensor PID/name. Require exactly `OV2640`/`0x26` before
+  saying OV2640, or exactly `OV3660`/`0x3660` before saying OV3660. Require
+  `supported_sensor_verified=true` for either; require
+  `ov2640_verified=false` for OV3660. Unknown identities fail closed.
 - Record actual PSRAM initialization and size.
 - Decode 100 consecutive VGA JPEG snapshots and confirm dimensions/markers.
 - Move the scene and prove frame sequences and hashes change.

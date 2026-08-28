@@ -48,6 +48,8 @@ class CameraProtocolTests(unittest.TestCase):
             "CONFIG_SPIRAM_IGNORE_NOTFOUND=y",
             "CONFIG_SPIRAM_USE_MALLOC=y",
             "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384",
+            "CONFIG_OV2640_SUPPORT=y",
+            "CONFIG_OV3660_SUPPORT=y",
             "CONFIG_ESP_INT_WDT=y",
             "CONFIG_ESP_TASK_WDT_EN=y",
             "CONFIG_ESP_TASK_WDT_INIT=y",
@@ -100,11 +102,22 @@ class CameraProtocolTests(unittest.TestCase):
     def test_camera_baseline_is_diagnostic_first(self):
         state = self.contract["camera_state"]
         self.assertEqual(state["configured_pinmap"], "ai_thinker_candidate")
-        self.assertEqual(state["required_sensor_pid"], 0x26)
+        self.assertEqual(
+            state["supported_sensors"],
+            [
+                {"name": "OV2640", "pid": 0x26},
+                {"name": "OV3660", "pid": 0x3660},
+            ],
+        )
+        self.assertEqual(
+            state["sensor_verification_field"], "supported_sensor_verified"
+        )
         self.assertEqual((state["baseline_width"], state["baseline_height"]), (640, 480))
         for evidence in (
             "esp_psram_is_initialized()",
-            "sensor->id.PID == OV2640_PID",
+            "status_.sensor.pid == OV2640_PID",
+            "status_.sensor.pid == OV3660_PID",
+            "status_.sensor.supported_sensor_verified",
             "valid_jpeg(frame)",
             "status_.pinmap_verified",
             "PIXFORMAT_JPEG",

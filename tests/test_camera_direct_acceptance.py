@@ -49,6 +49,10 @@ class CameraState:
         self.initialized = True
         self.generation = 7
         self.sequence = 20
+        self.sensor_name = "OV2640"
+        self.sensor_pid = 38
+        self.ov2640_verified = True
+        self.supported_sensor_verified = True
         self.requests: list[tuple[str, str, str | None]] = []
         self.media: dict[str, str] = {}
 
@@ -73,9 +77,10 @@ class CameraState:
                 "generation": self.generation,
                 "sensor": {
                     "detected": True,
-                    "name": "OV2640",
-                    "pid": 38,
-                    "ov2640_verified": True,
+                    "name": self.sensor_name,
+                    "pid": self.sensor_pid,
+                    "ov2640_verified": self.ov2640_verified,
+                    "supported_sensor_verified": self.supported_sensor_verified,
                 },
                 "psram": {"initialized": True, "size_bytes": 4 * 1024 * 1024},
                 "width": 640 if self.enabled else None,
@@ -359,6 +364,36 @@ class CameraDirectAcceptanceTests(unittest.TestCase):
         self.assertEqual(summary.storage, "created")
         self.assertEqual(set(server.state.media), {SNAPSHOT_ID, CLIP_ID})
         self.assertFalse(any(method == "DELETE" for method, _, _ in server.state.requests))
+
+    def test_ov3660_acceptance_never_claims_ov2640(self) -> None:
+        with ServerContext() as server:
+            server.state.sensor_name = "OV3660"
+            server.state.sensor_pid = 0x3660
+            server.state.ov2640_verified = False
+            summary = MODULE.run_acceptance(
+                config(server), TOKEN, allow_loopback_for_test=True
+            )
+        self.assertEqual(summary, MODULE.AcceptanceSummary(9, 4, "skipped"))
+
+    def test_unknown_or_contradictory_sensor_evidence_fails_closed(self) -> None:
+        with ServerContext() as server:
+            server.state.sensor_name = "OV3660"
+            server.state.sensor_pid = 0x3660
+            server.state.ov2640_verified = True
+            with self.assertRaisesRegex(MODULE.AcceptanceError, "camera_not_ready"):
+                MODULE.run_acceptance(
+                    config(server), TOKEN, allow_loopback_for_test=True
+                )
+
+        with ServerContext() as server:
+            server.state.sensor_name = "UNKNOWN"
+            server.state.sensor_pid = 0x1234
+            server.state.ov2640_verified = False
+            server.state.supported_sensor_verified = False
+            with self.assertRaisesRegex(MODULE.AcceptanceError, "camera_not_ready"):
+                MODULE.run_acceptance(
+                    config(server), TOKEN, allow_loopback_for_test=True
+                )
 
     def test_separate_delete_flag_deletes_only_created_objects(self) -> None:
         with ServerContext() as server:

@@ -19,8 +19,9 @@ namespace {
 constexpr char kTag[] = "noob_camera";
 constexpr std::uint32_t kDiagnosticFrameTimeoutMs = 5000;
 
-// Candidate map only. Successful SCCB probe, OV2640 PID, working PSRAM, and a
-// valid fresh JPEG are all required before pinmap_verified becomes true.
+// Candidate map only. A successful SCCB probe with an allowlisted sensor
+// name/PID pair, working PSRAM, and a valid fresh JPEG are all required before
+// pinmap_verified becomes true.
 constexpr int kPinPwdn = 32;
 constexpr int kPinReset = -1;
 constexpr int kPinXclk = 0;
@@ -195,13 +196,20 @@ esp_err_t CameraManager::initialize_sensor_locked() {
 
     status_.sensor.detected = true;
     status_.sensor.pid = sensor->id.PID;
-    status_.sensor.ov2640_verified = sensor->id.PID == OV2640_PID;
     camera_sensor_info_t *info = esp_camera_sensor_get_info(&sensor->id);
     status_.sensor.name = info != nullptr && info->name != nullptr ? info->name : "unknown";
-    if (!status_.sensor.ov2640_verified) {
-        ESP_LOGE(kTag, "Detected sensor PID 0x%04x is not the required OV2640",
+    const bool is_ov2640 = status_.sensor.pid == OV2640_PID &&
+                           status_.sensor.name == "OV2640";
+    const bool is_ov3660 = status_.sensor.pid == OV3660_PID &&
+                           status_.sensor.name == "OV3660";
+    status_.sensor.ov2640_verified = is_ov2640;
+    status_.sensor.supported_sensor_verified = is_ov2640 || is_ov3660;
+    if (!status_.sensor.supported_sensor_verified) {
+        ESP_LOGE(kTag,
+                 "Detected unsupported sensor name=%s PID=0x%04x",
+                 status_.sensor.name.c_str(),
                  static_cast<unsigned>(status_.sensor.pid));
-        set_error_locked("sensor_not_ov2640");
+        set_error_locked("sensor_not_supported");
         deinitialize_sensor_locked();
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -330,8 +338,9 @@ void CameraManager::capture_task() {
                     ++status_.frame_sequence;
                     latest_uptime_ms_ = uptime_ms();
                     status_.last_frame_uptime_ms = latest_uptime_ms_;
-                    status_.pinmap_verified = status_.sensor.ov2640_verified &&
-                                              status_.psram.initialized;
+                    status_.pinmap_verified =
+                        status_.sensor.supported_sensor_verified &&
+                        status_.psram.initialized;
                     status_.last_error.clear();
                     captured = true;
                     esp_camera_fb_return(frame);

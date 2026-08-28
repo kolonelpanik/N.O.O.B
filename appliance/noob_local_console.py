@@ -52,6 +52,7 @@ JOB_ID = re.compile(r"^j_[0-9a-f]{32}$")
 MAX_FRAME_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_STORAGE_RESPONSE_BYTES = 128 * 1024
 MAX_STORAGE_ITEMS = 50
+MAX_CAMERA_CLIP_FRAME_INDEX = 149
 VIDEO_MODE_REQUEST_TIMEOUT = 65.0
 CAMERA_ACTION_TIMEOUT = 35.0
 VIEW_SOURCES = frozenset(("target", "environment"))
@@ -966,10 +967,13 @@ def run_wm_commands(
 class FullscreenController:
     """Force true borderless fullscreen while retaining a restorable WM state.
 
-    XFCE may treat Tk's ``-fullscreen`` attribute as a request rather than a
-    guarantee.  An override-redirect window plus explicit physical-screen
-    geometry removes decorations and panel reservations; the fullscreen hint is
-    still set so compositors can optimize presentation.
+    XFCE may apply Tk's asynchronous ``-fullscreen`` request after a later
+    override-redirect transition.  That race can leave the *restored* window
+    fullscreen even though the exit path already requested normal geometry.
+    Apply the EWMH hint while the window is still managed, then use an
+    override-redirect window plus explicit physical-screen geometry as the
+    edge-to-edge fallback.  Exit performs the inverse transition and restores
+    geometry only after the WM has removed its fullscreen state.
     """
 
     def __init__(
@@ -989,18 +993,34 @@ class FullscreenController:
             return
         self.root.update_idletasks()
         self.normal_geometry = str(self.root.geometry())
+        window_id = int(self.root.winfo_id())
+        screen_width = int(self.root.winfo_screenwidth())
+        screen_height = int(self.root.winfo_screenheight())
+        # Send the EWMH request while XFCE still manages the decorated window.
+        # wmctrl cannot reliably change _NET_WM_STATE after override-redirect
+        # has detached the toplevel from normal WM placement.  Do not also set
+        # Tk's asynchronous -fullscreen=True flag: on XFCE that request can be
+        # delivered only after exit re-parents the window, recreating the exact
+        # fullscreen state we are trying to remove.
+        run_wm_commands(
+            xfce_fullscreen_commands(
+                window_id,
+                screen_width,
+                screen_height,
+                enabled=True,
+            ),
+            runner=self.command_runner,
+        )
+        self.root.update_idletasks()
         self.active = True
         # Re-map the window after changing override-redirect.  XFCE otherwise
         # may keep the old decorated frame and its panel work-area constraint.
         self.root.withdraw()
+        self.root.update_idletasks()
         self.root.overrideredirect(True)
-        self.root.attributes("-fullscreen", True)
         self.root.attributes("-topmost", True)
         self.root.geometry(
-            fullscreen_geometry(
-                int(self.root.winfo_screenwidth()),
-                int(self.root.winfo_screenheight()),
-            )
+            fullscreen_geometry(screen_width, screen_height)
         )
         self.root.deiconify()
         self.root.state("normal")
@@ -1020,12 +1040,17 @@ class FullscreenController:
         self.root.deiconify()
         self.root.state("normal")
         self.root.update_idletasks()
+        # The EWMH request was issued before override-redirect.  At this point
+        # XFCE may no longer list the fallback window, so only perform the
+        # idempotent X11 map needed after Tk flushes its queued transition.
         run_wm_commands(
-            xfce_fullscreen_commands(
-                int(self.root.winfo_id()),
-                int(self.root.winfo_screenwidth()),
-                int(self.root.winfo_screenheight()),
-                enabled=True,
+            (
+                (
+                    "/usr/bin/xdotool",
+                    "windowmap",
+                    "--sync",
+                    str(int(self.root.winfo_id())),
+                ),
             ),
             runner=self.command_runner,
         )
@@ -1038,27 +1063,43 @@ class FullscreenController:
             self.root.attributes("-topmost", topmost)
             return
         self.active = False
+        window_id = int(self.root.winfo_id())
+        screen_width = int(self.root.winfo_screenwidth())
+        screen_height = int(self.root.winfo_screenheight())
         self.root.withdraw()
-        self.root.attributes("-fullscreen", False)
+        # Finish the override-window unmap before re-parenting it.  Otherwise a
+        # queued Tk unmap can run after xdotool maps the restored window.
+        self.root.update_idletasks()
         self.root.overrideredirect(False)
-        if self.normal_geometry:
-            self.root.geometry(self.normal_geometry)
-        self.root.attributes("-topmost", topmost)
+        # Clearing is safe and synchronous here because the window has been
+        # returned to normal WM management.  The controller never sets this
+        # flag true; this defensive clear also recovers from an older process
+        # or WM session that left the Tk attribute behind.
+        self.root.attributes("-fullscreen", False)
         self.root.deiconify()
         self.root.state("normal")
-        # Preserve the same ordering when restoring the decorated window: Tk
-        # settles its state first and xdotool performs the final idempotent map.
+        # First settle the managed window, then remove EWMH fullscreen/above.
+        # Applying the saved geometry before this removal lets XFCE overwrite
+        # it with the fullscreen restore geometry, which caused Escape to leave
+        # a 1280x720 window on the reference uConsole.
         self.root.update_idletasks()
         run_wm_commands(
             xfce_fullscreen_commands(
-                int(self.root.winfo_id()),
-                int(self.root.winfo_screenwidth()),
-                int(self.root.winfo_screenheight()),
+                window_id,
+                screen_width,
+                screen_height,
                 enabled=False,
             ),
             runner=self.command_runner,
         )
         self.root.update_idletasks()
+        if self.normal_geometry:
+            self.root.geometry(self.normal_geometry)
+        self.root.update_idletasks()
+        # wmctrl removes the temporary ``above`` hint together with
+        # ``fullscreen``.  Reapply the operator's persisted pin choice last so
+        # a pinned normal window remains pinned after Escape.
+        self.root.attributes("-topmost", topmost)
         self.root.lift()
         self.root.focus_force()
 
@@ -1527,6 +1568,31 @@ class GatewayClient:
             raise LocalConsoleError("camera_storage_unavailable")
         return camera_storage_item_from_payload(payload.get("item"))
 
+    def camera_snapshot_content(self, media_id: str) -> bytes:
+        if not isinstance(media_id, str) or MEDIA_ID.fullmatch(media_id) is None:
+            raise LocalConsoleError("camera_storage_unavailable")
+        return self._camera_media_jpeg(
+            f"/api/v1/environment-camera/storage/{media_id}/content"
+        )
+
+    def camera_clip_frame(self, media_id: str, frame_index: int) -> bytes:
+        if (
+            not isinstance(media_id, str)
+            or MEDIA_ID.fullmatch(media_id) is None
+            or not _is_int(frame_index)
+            or not 0 <= frame_index <= MAX_CAMERA_CLIP_FRAME_INDEX
+        ):
+            raise LocalConsoleError("camera_storage_unavailable")
+        return self._camera_media_jpeg(
+            f"/api/v1/environment-camera/storage/{media_id}/frames/{frame_index}.jpg"
+        )
+
+    def _camera_media_jpeg(self, path: str) -> bytes:
+        raw = self._request(path, max_bytes=MAX_FRAME_RESPONSE_BYTES)
+        if not (raw.startswith(b"\xff\xd8") and raw.endswith(b"\xff\xd9")):
+            raise LocalConsoleError("camera_media_invalid")
+        return raw
+
     def _camera_capture(
         self, path: str, body_value: dict[str, Any]
     ) -> CameraStorageItem:
@@ -1624,6 +1690,10 @@ class NoobLocalConsole:
             CameraStorageState.unavailable(), (), None
         )
         self.storage_inflight = False
+        self.media_preview_inflight = False
+        self.media_preview_request: tuple[str, int] | None = None
+        self.media_preview_item: CameraStorageItem | None = None
+        self.media_preview_frame_index = 0
         self.active_clip_job_id: str | None = None
         self.active_clip_job: CameraClipJob | None = None
         self.photo: Any | None = None
@@ -1906,6 +1976,52 @@ class NoobLocalConsole:
             font=("Sans", 9),
         )
         self.storage_list.pack(fill="x", pady=(5, 0))
+        self.storage_list.bind(
+            "<<ListboxSelect>>", lambda _event: self._set_buttons()
+        )
+        self.storage_list.bind(
+            "<Double-Button-1>", lambda _event: self._open_selected_media()
+        )
+        media_controls = tk.Frame(
+            self.environment_settings, bg=SURFACE_RAISED
+        )
+        media_controls.pack(fill="x", pady=(5, 0))
+        self.storage_open_button = ttk.Button(
+            media_controls,
+            text="OPEN PREVIEW",
+            style="Noob.TButton",
+            command=self._open_selected_media,
+        )
+        self.storage_open_button.pack(side="left")
+        self.media_previous_button = ttk.Button(
+            media_controls,
+            text="PREVIOUS FRAME",
+            style="Noob.TButton",
+            command=lambda: self._navigate_media_preview(-1),
+        )
+        self.media_previous_button.pack(side="left", padx=(5, 0))
+        self.media_next_button = ttk.Button(
+            media_controls,
+            text="NEXT FRAME",
+            style="Noob.TButton",
+            command=lambda: self._navigate_media_preview(1),
+        )
+        self.media_next_button.pack(side="left", padx=(5, 0))
+        self.media_live_button = ttk.Button(
+            media_controls,
+            text="RETURN LIVE",
+            style="Noob.TButton",
+            command=self._close_media_preview,
+        )
+        self.media_live_button.pack(side="right")
+        self.media_preview_detail = tk.Label(
+            self.environment_settings,
+            text="Select a stored item to preview it without changing camera media.",
+            bg=SURFACE_RAISED,
+            fg=MUTED,
+            font=("Sans", 9),
+        )
+        self.media_preview_detail.pack(anchor="w", pady=(5, 0))
 
         stage = tk.Frame(
             self.root,
@@ -1968,6 +2084,8 @@ class NoobLocalConsole:
             "clip_stop",
             "clip_stop_error",
             "clip_job",
+            "media_preview",
+            "media_preview_error",
             "screenshot",
             "screenshot_error",
         }:
@@ -2026,18 +2144,19 @@ class NoobLocalConsole:
                     self._offer(("clip_job_error", exc.code))
                 next_clip_job = now + 0.4
             source = self.source
-            try:
-                self._offer(("frame", (source, self.client.frame(source))))
-            except LocalConsoleError as exc:
-                if exc.code not in {
-                    "video_unavailable",
-                    "gateway_unavailable",
-                    "camera_not_configured",
-                    "camera_unavailable",
-                    "camera_stream_disabled",
-                    "environment_camera_unavailable",
-                }:
-                    self._offer(("error", exc.code))
+            if self.media_preview_item is None and self.media_preview_request is None:
+                try:
+                    self._offer(("frame", (source, self.client.frame(source))))
+                except LocalConsoleError as exc:
+                    if exc.code not in {
+                        "video_unavailable",
+                        "gateway_unavailable",
+                        "camera_not_configured",
+                        "camera_unavailable",
+                        "camera_stream_disabled",
+                        "environment_camera_unavailable",
+                    }:
+                        self._offer(("error", exc.code))
             self.stop_event.wait(self.FRAME_INTERVAL)
 
     def _drain_events(self) -> None:
@@ -2186,6 +2305,33 @@ class NoobLocalConsole:
                 elif kind == "storage_error":
                     self.storage_inflight = False
                     self._show_error(payload)
+                elif kind == "media_preview":
+                    item, frame_index, data = payload
+                    request_key = (item.item_id, frame_index)
+                    if (
+                        self.source == "environment"
+                        and self.media_preview_request == request_key
+                    ):
+                        self.media_preview_request = None
+                        self.media_preview_inflight = False
+                        self.media_preview_item = item
+                        self.media_preview_frame_index = frame_index
+                        self._apply_frame("environment", data)
+                        self._update_media_preview_detail()
+                        self.message.configure(
+                            text=(
+                                f"Stored {item.kind} preview · "
+                                f"frame {frame_index + 1} of {item.frame_count} · "
+                                "camera media remains unchanged."
+                            ),
+                            fg=SIGNAL,
+                        )
+                elif kind == "media_preview_error":
+                    request_key, error_code = payload
+                    if self.media_preview_request == request_key:
+                        self.media_preview_request = None
+                        self.media_preview_inflight = False
+                        self._show_error(error_code)
                 elif kind == "screenshot":
                     self.action_inflight = False
                     self.message.configure(
@@ -2202,7 +2348,11 @@ class NoobLocalConsole:
             latest_frame, self.latest_frame = self.latest_frame, None
         if latest_frame is not None:
             source, data = latest_frame
-            if source == self.source:
+            if (
+                source == self.source
+                and self.media_preview_item is None
+                and self.media_preview_request is None
+            ):
                 self._apply_frame(source, data)
         self._set_buttons()
         self.root.after(40, self._drain_events)
@@ -2354,7 +2504,17 @@ class NoobLocalConsole:
                 self.message.configure(text="Waiting for the video, UART, keyboard, and trackball proof layers.", fg=WARN)
         if self.source == "environment":
             camera = state.environment_camera
-            if not camera.sensor_enabled:
+            if self.media_preview_item is not None:
+                item = self.media_preview_item
+                self.message.configure(
+                    text=(
+                        f"Stored {item.kind} preview · frame "
+                        f"{self.media_preview_frame_index + 1} of "
+                        f"{item.frame_count} · target input remains disarmed."
+                    ),
+                    fg=SIGNAL,
+                )
+            elif not camera.sensor_enabled:
                 self.message.configure(
                     text="Environment camera view is logically off. USB power remains on.",
                     fg=MUTED,
@@ -2390,6 +2550,7 @@ class NoobLocalConsole:
             )
         if (
             self.source == "environment"
+            and self.media_preview_item is None
             and (not camera.sensor_enabled or not camera.stream_enabled)
         ):
             self.current_frame_bytes = None
@@ -2445,6 +2606,14 @@ class NoobLocalConsole:
     def _apply_storage(self, catalog: CameraStorageCatalog) -> None:
         self.storage_catalog = catalog
         self.storage_inflight = False
+        if (
+            self.media_preview_item is not None
+            and all(
+                item.item_id != self.media_preview_item.item_id
+                for item in catalog.items
+            )
+        ):
+            self._close_media_preview()
         if self.current_state is not None:
             camera = replace(
                 self.current_state.environment_camera,
@@ -2462,6 +2631,7 @@ class NoobLocalConsole:
                 self.storage_list.insert("end", item.display_label)
         if catalog.next_cursor is not None:
             self.storage_list.insert("end", "More items are available in storage")
+        self._update_media_preview_detail()
 
     def _apply_modes(self, catalog: VideoModeCatalog) -> None:
         self.video_modes = catalog.modes
@@ -2537,6 +2707,7 @@ class NoobLocalConsole:
             "camera_state_unconfirmed": "The camera state change was not confirmed; authoritative status will refresh.",
             "invalid_camera_state_request": "The environment-camera state request was rejected locally.",
             "camera_storage_unavailable": "Camera microSD storage is unavailable.",
+            "camera_media_invalid": "The stored camera media could not be decoded safely.",
             "camera_capture_unconfirmed": "The camera did not confirm the microSD capture.",
             "camera_clip_unconfirmed": "The camera clip job could not be confirmed; it was not replayed.",
             "camera_clip_failed": "The camera reported that the bounded clip job failed.",
@@ -2637,6 +2808,49 @@ class NoobLocalConsole:
                 else "disabled"
             )
         )
+        selected_media = self._selected_storage_item()
+        media_read_available = bool(
+            camera_controls
+            and camera.storage.available
+            and not self.media_preview_inflight
+        )
+        self.storage_open_button.configure(
+            state=(
+                "normal"
+                if media_read_available and selected_media is not None
+                else "disabled"
+            )
+        )
+        preview = self.media_preview_item
+        self.media_previous_button.configure(
+            state=(
+                "normal"
+                if media_read_available
+                and preview is not None
+                and preview.kind == "clip"
+                and self.media_preview_frame_index > 0
+                else "disabled"
+            )
+        )
+        self.media_next_button.configure(
+            state=(
+                "normal"
+                if media_read_available
+                and preview is not None
+                and preview.kind == "clip"
+                and self.media_preview_frame_index + 1 < preview.frame_count
+                else "disabled"
+            )
+        )
+        self.media_live_button.configure(
+            state=(
+                "normal"
+                if self.source == "environment"
+                and preview is not None
+                and not self.media_preview_inflight
+                else "disabled"
+            )
+        )
 
     def _action(self, name: str) -> None:
         if self.action_inflight or self.closing:
@@ -2702,6 +2916,10 @@ class NoobLocalConsole:
             return
         self.source = source_name
         self.source_var.set(source_name)
+        self.media_preview_request = None
+        self.media_preview_inflight = False
+        self.media_preview_item = None
+        self.media_preview_frame_index = 0
         self.current_frame_bytes = None
         self.current_image = None
         self.photo = None
@@ -2714,6 +2932,7 @@ class NoobLocalConsole:
             self.target_settings.pack_forget()
             self.environment_settings.pack(fill="x")
             self._refresh_storage()
+        self._update_media_preview_detail()
         self._render_current_frame()
         self._set_buttons()
 
@@ -2896,6 +3115,114 @@ class NoobLocalConsole:
             daemon=True,
             name="noob-local-camera-storage",
         ).start()
+
+    def _selected_storage_item(self) -> CameraStorageItem | None:
+        try:
+            selection = self.storage_list.curselection()
+        except tk.TclError:
+            return None
+        if len(selection) != 1:
+            return None
+        index = int(selection[0])
+        if not 0 <= index < len(self.storage_catalog.items):
+            return None
+        return self.storage_catalog.items[index]
+
+    def _open_selected_media(self) -> None:
+        item = self._selected_storage_item()
+        if item is not None:
+            self._request_media_preview(item, 0)
+
+    def _navigate_media_preview(self, offset: int) -> None:
+        item = self.media_preview_item
+        if item is None or item.kind != "clip" or offset not in {-1, 1}:
+            return
+        self._request_media_preview(item, self.media_preview_frame_index + offset)
+
+    def _request_media_preview(
+        self, item: CameraStorageItem, frame_index: int
+    ) -> None:
+        if (
+            self.source != "environment"
+            or self.media_preview_inflight
+            or self.closing
+            or not _is_int(frame_index)
+            or not 0 <= frame_index < item.frame_count
+            or frame_index > MAX_CAMERA_CLIP_FRAME_INDEX
+            or (item.kind == "snapshot" and frame_index != 0)
+        ):
+            return
+        request_key = (item.item_id, frame_index)
+        self.media_preview_request = request_key
+        self.media_preview_inflight = True
+        self.message.configure(
+            text=(
+                f"Loading stored {item.kind} preview · "
+                f"frame {frame_index + 1} of {item.frame_count}…"
+            ),
+            fg=SIGNAL,
+        )
+        self._update_media_preview_detail()
+        self._set_buttons()
+
+        def run() -> None:
+            try:
+                data = (
+                    self.client.camera_snapshot_content(item.item_id)
+                    if item.kind == "snapshot"
+                    else self.client.camera_clip_frame(item.item_id, frame_index)
+                )
+                self._offer(("media_preview", (item, frame_index, data)))
+            except LocalConsoleError as exc:
+                self._offer(("media_preview_error", (request_key, exc.code)))
+
+        threading.Thread(
+            target=run,
+            daemon=True,
+            name="noob-local-camera-media-preview",
+        ).start()
+
+    def _close_media_preview(self) -> None:
+        self.media_preview_request = None
+        self.media_preview_inflight = False
+        self.media_preview_item = None
+        self.media_preview_frame_index = 0
+        self.current_frame_bytes = None
+        self.current_image = None
+        self.photo = None
+        self.pan_x = 0
+        self.pan_y = 0
+        self._update_media_preview_detail()
+        self._render_current_frame()
+        self._set_buttons()
+
+    def _update_media_preview_detail(self) -> None:
+        item = self.media_preview_item
+        if self.media_preview_inflight and self.media_preview_request is not None:
+            self.media_preview_detail.configure(
+                text=(
+                    "Loading stored media by opaque camera ID · "
+                    "no paths or media changes are accepted."
+                ),
+                fg=SIGNAL,
+            )
+        elif item is None:
+            self.media_preview_detail.configure(
+                text=(
+                    "Select a stored item to preview it without changing "
+                    "camera media."
+                ),
+                fg=MUTED,
+            )
+        else:
+            self.media_preview_detail.configure(
+                text=(
+                    f"Stored {item.kind} · frame "
+                    f"{self.media_preview_frame_index + 1} of {item.frame_count} · "
+                    "read-only preview"
+                ),
+                fg=SIGNAL,
+            )
 
     def _screenshot(self) -> None:
         if (

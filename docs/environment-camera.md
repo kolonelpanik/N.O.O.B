@@ -76,9 +76,10 @@ changing this root-owned configuration.
   "pinmap_verified": true,
   "sensor": {
     "detected": true,
-    "name": "OV2640",
-    "pid": 38,
-    "ov2640_verified": true
+    "name": "OV3660",
+    "pid": 13920,
+    "ov2640_verified": false,
+    "supported_sensor_verified": true
   },
   "psram": {
     "initialized": true,
@@ -109,9 +110,12 @@ generation so two operator interfaces cannot silently overwrite one another.
 `reachable` proves an authenticated API response from the pinned ID. It does
 not collapse the other proof fields: `network_verified`, `hardware_verified`,
 and `reported_frame.v1_fresh_verified` retain the station/provisioning,
-AI-Thinker candidate pin map, OV2640 PID/name, PSRAM, and exact 640 x 480 JPEG
-evidence independently. A false proof remains visible for diagnosis, while a
-contradictory non-v1 status claim or non-VGA JPEG is rejected.
+AI-Thinker candidate pin map, allowlisted sensor PID/name, PSRAM, and exact 640
+x 480 JPEG evidence independently. The v1 allowlist is exactly OV2640/`0x26`
+and OV3660/`0x3660`; `ov2640_verified` remains false for OV3660 while the
+model-neutral `supported_sensor_verified` carries the product gate. A false
+proof remains visible for diagnosis, while a contradictory sensor claim,
+non-v1 status claim, or non-VGA JPEG is rejected.
 
 ## Bounded routes
 

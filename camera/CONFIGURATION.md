@@ -176,8 +176,8 @@ pass/fail record. It validates:
 - a missing-credential challenge, a deliberately invalid bearer rejection,
   and query-credential rejection without exposing the real bearer;
 - the authenticated full device identity and allowlisted status shape;
-- the AI-Thinker pin map, verified OV2640 PID, initialized PSRAM, and a fresh
-  exact 640x480 JPEG baseline;
+- the AI-Thinker pin map, a verified allowlisted OV2640 or OV3660 name/PID
+  pair, initialized PSRAM, and a fresh exact 640x480 JPEG baseline;
 - bounded frame-sequence and frame-hash progress;
 - generation-checked disable and re-enable, including disabled capture
   rejection and a newly decoded frame after re-enable.

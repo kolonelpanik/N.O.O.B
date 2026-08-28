@@ -572,7 +572,11 @@ class LocalConsoleContractTests(unittest.TestCase):
 
             def _request(self, path, **kwargs):
                 self.calls.append((path, kwargs))
-                if path.endswith("/frame.jpg"):
+                if (
+                    path.endswith("/frame.jpg")
+                    or path.endswith("/content")
+                    or ("/frames/" in path and path.endswith(".jpg"))
+                ):
                     return b"\xff\xd8frame\xff\xd9"
                 if path.endswith("/state"):
                     return json.dumps(
@@ -628,6 +632,24 @@ class LocalConsoleContractTests(unittest.TestCase):
         self.assertEqual(client.camera_clip_job(job_id).state, "complete")
         self.assertEqual(client.stop_camera_clip(job_id), "cancelling")
         self.assertEqual(client.camera_media(clip_item["id"]).duration_ms, 10_000)
+        self.assertEqual(
+            client.camera_snapshot_content(snapshot_item["id"]),
+            b"\xff\xd8frame\xff\xd9",
+        )
+        self.assertEqual(
+            client.camera_clip_frame(clip_item["id"], 19),
+            b"\xff\xd8frame\xff\xd9",
+        )
+        calls_before_rejection = len(client.calls)
+        with self.assertRaisesRegex(
+            MODULE.LocalConsoleError, "camera_storage_unavailable"
+        ):
+            client.camera_snapshot_content("../../etc/passwd")
+        with self.assertRaisesRegex(
+            MODULE.LocalConsoleError, "camera_storage_unavailable"
+        ):
+            client.camera_clip_frame(clip_item["id"], 150)
+        self.assertEqual(len(client.calls), calls_before_rejection)
 
         paths = [path for path, _kwargs in client.calls]
         self.assertEqual(
@@ -641,6 +663,8 @@ class LocalConsoleContractTests(unittest.TestCase):
                 f"/api/v1/environment-camera/jobs/{job_id}",
                 f"/api/v1/environment-camera/jobs/{job_id}/stop",
                 f"/api/v1/environment-camera/storage/{clip_item['id']}",
+                f"/api/v1/environment-camera/storage/{snapshot_item['id']}/content",
+                f"/api/v1/environment-camera/storage/{clip_item['id']}/frames/19.jpg",
             ],
         )
         self.assertEqual(
@@ -672,6 +696,115 @@ class LocalConsoleContractTests(unittest.TestCase):
                     {"ok": True, "job": {**base, "state": state}}
                 )
                 self.assertEqual(job.state, state)
+
+    def test_local_media_preview_uses_catalog_items_and_bounded_clip_navigation(self):
+        snapshot = MODULE.camera_storage_item_from_payload(
+            {
+                "id": "m_00000000000000000000000000000001",
+                "kind": "snapshot",
+                "state": "complete",
+                "created_at": None,
+                "created_uptime_ms": 100,
+                "size_bytes": 1111,
+                "width": 640,
+                "height": 480,
+                "frame_count": 1,
+                "fps": None,
+                "duration_ms": 0,
+                "content_type": "image/jpeg",
+            }
+        )
+        clip = MODULE.camera_storage_item_from_payload(
+            {
+                "id": "m_00000000000000000000000000000002",
+                "kind": "clip",
+                "state": "complete",
+                "created_at": None,
+                "created_uptime_ms": 200,
+                "size_bytes": 2222,
+                "width": 640,
+                "height": 480,
+                "frame_count": 3,
+                "fps": 1,
+                "duration_ms": 3000,
+                "content_type": "application/vnd.noob.clip+json",
+            }
+        )
+
+        class Message:
+            def configure(self, **_kwargs):
+                pass
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def camera_snapshot_content(self, media_id):
+                self.calls.append(("snapshot", media_id))
+                return b"\xff\xd8snapshot\xff\xd9"
+
+            def camera_clip_frame(self, media_id, frame_index):
+                self.calls.append(("clip", media_id, frame_index))
+                return b"\xff\xd8clip\xff\xd9"
+
+        class ImmediateThread:
+            def __init__(self, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        console = MODULE.NoobLocalConsole.__new__(MODULE.NoobLocalConsole)
+        console.source = "environment"
+        console.media_preview_inflight = False
+        console.media_preview_request = None
+        console.media_preview_item = None
+        console.media_preview_frame_index = 0
+        console.closing = False
+        console.client = Client()
+        console.message = Message()
+        console._update_media_preview_detail = lambda: None
+        console._set_buttons = lambda: None
+        offered = []
+        console._offer = offered.append
+
+        with mock.patch.object(MODULE.threading, "Thread", ImmediateThread):
+            console._request_media_preview(snapshot, 0)
+        self.assertEqual(console.client.calls, [("snapshot", snapshot.item_id)])
+        self.assertEqual(offered[0][0], "media_preview")
+        self.assertEqual(offered[0][1][:2], (snapshot, 0))
+
+        console.media_preview_inflight = False
+        console.media_preview_request = None
+        console.media_preview_item = clip
+        console.media_preview_frame_index = 0
+        with mock.patch.object(MODULE.threading, "Thread", ImmediateThread):
+            console._navigate_media_preview(-1)
+            console._navigate_media_preview(1)
+        self.assertEqual(console.client.calls[-1], ("clip", clip.item_id, 1))
+
+        console.media_preview_inflight = False
+        console.media_preview_request = None
+        console.media_preview_frame_index = clip.frame_count - 1
+        calls_before_bound = list(console.client.calls)
+        with mock.patch.object(MODULE.threading, "Thread", ImmediateThread):
+            console._navigate_media_preview(1)
+        self.assertEqual(console.client.calls, calls_before_bound)
+
+        class Selection:
+            def __init__(self, index):
+                self.index = index
+
+            def curselection(self):
+                return (self.index,)
+
+        console.storage_catalog = MODULE.CameraStorageCatalog(
+            MODULE.CameraStorageState.unavailable(), (snapshot, clip), None
+        )
+        console.storage_list = Selection(1)
+        self.assertIs(console._selected_storage_item(), clip)
+        console.storage_list = Selection(2)
+        self.assertIsNone(console._selected_storage_item())
 
     def test_screenshot_is_private_and_never_overwrites(self):
         data = b"\xff\xd8private-jpeg\xff\xd9"
@@ -725,6 +858,7 @@ class LocalConsoleContractTests(unittest.TestCase):
                 self.y = 18
                 self.mapped = True
                 self.pending_unmap = False
+                self.wm_fullscreen = False
                 self.calls = []
 
             def update_idletasks(self):
@@ -804,14 +938,35 @@ class LocalConsoleContractTests(unittest.TestCase):
         def wm_runner(command, **_kwargs):
             wm_calls.append(command)
             root.calls.append(("wm", *command))
+            if command[-1:] == ("add,fullscreen,above",):
+                root.wm_fullscreen = True
+            elif command[-1:] == ("remove,fullscreen,above",):
+                root.wm_fullscreen = False
+                # Model XFCE applying its fullscreen restore geometry when the
+                # state hint is removed.  The controller must apply the saved
+                # geometry *after* this transition or Escape leaves the window
+                # at the physical-screen size.
+                root.geometry_value = "1280x720+0+0"
+                root.width, root.height, root.x, root.y = 1280, 720, 0, 0
             if command[:2] == ("/usr/bin/xdotool", "windowmap"):
                 root.mapped = True
             return subprocess.CompletedProcess(command, 0)
 
         controller = MODULE.FullscreenController(root, command_runner=wm_runner)
         controller.enter()
+        add_call = (
+            "wm",
+            "/usr/bin/wmctrl",
+            "-i",
+            "-r",
+            "0x1234",
+            "-b",
+            "add,fullscreen,above",
+        )
+        self.assertLess(root.calls.index(add_call), root.calls.index(("withdraw",)))
         self.assertTrue(root.calls.index(("withdraw",)) < root.calls.index(("override", True)))
-        self.assertIn(("attribute", "-fullscreen", True), root.calls)
+        self.assertNotIn(("attribute", "-fullscreen", True), root.calls)
+        self.assertTrue(root.wm_fullscreen)
         self.assertIn(("geometry", "1280x720+0+0"), root.calls)
         self.assertTrue(MODULE.window_covers_screen(root))
         self.assertIn(
@@ -829,25 +984,54 @@ class LocalConsoleContractTests(unittest.TestCase):
             ("/usr/bin/xdotool", "windowmap", "--sync", str(0x1234)),
             wm_calls,
         )
-        self.assertLess(
-            root.calls.index(("flush-unmap",)),
-            root.calls.index(
-                (
-                    "wm",
-                    "/usr/bin/xdotool",
-                    "windowmap",
-                    "--sync",
-                    str(0x1234),
-                )
-            ),
+        map_call = (
+            "wm",
+            "/usr/bin/xdotool",
+            "windowmap",
+            "--sync",
+            str(0x1234),
         )
+        map_positions = [
+            index for index, call in enumerate(root.calls) if call == map_call
+        ]
+        self.assertGreaterEqual(len(map_positions), 2)
+        self.assertLess(map_positions[0], root.calls.index(("withdraw",)))
+        self.assertLess(root.calls.index(("flush-unmap",)), map_positions[1])
         root.mapped = False
         self.assertFalse(MODULE.window_covers_screen(root))
         root.mapped = True
 
+        exit_call_start = len(root.calls)
         controller.exit(topmost=False)
-        self.assertIn(("override", False), root.calls)
+        exit_calls = root.calls[exit_call_start:]
+        remove_call = (
+            "wm",
+            "/usr/bin/wmctrl",
+            "-i",
+            "-r",
+            "0x1234",
+            "-b",
+            "remove,fullscreen,above",
+        )
+        self.assertLess(
+            exit_calls.index(("override", False)),
+            exit_calls.index(("attribute", "-fullscreen", False)),
+        )
+        self.assertLess(
+            exit_calls.index(("attribute", "-fullscreen", False)),
+            exit_calls.index(remove_call),
+        )
+        self.assertLess(
+            exit_calls.index(remove_call),
+            exit_calls.index(("geometry", "1100x680+90+18")),
+        )
+        self.assertLess(
+            exit_calls.index(("geometry", "1100x680+90+18")),
+            exit_calls.index(("attribute", "-topmost", False)),
+        )
+        self.assertFalse(root.wm_fullscreen)
         self.assertEqual(root.geometry_value, "1100x680+90+18")
+        self.assertEqual((root.x, root.y, root.width, root.height), (90, 18, 1100, 680))
         self.assertIn(("attribute", "-topmost", False), root.calls)
         self.assertTrue(root.mapped)
         self.assertIn(
@@ -865,7 +1049,7 @@ class LocalConsoleContractTests(unittest.TestCase):
             wm_calls.count(
                 ("/usr/bin/xdotool", "windowmap", "--sync", str(0x1234))
             ),
-            2,
+            3,
         )
 
     def test_leaving_target_source_disarms_before_source_event(self):

@@ -35,13 +35,19 @@ describe("MCP contract", () => {
     }
 
     const open = listed.tools.find((tool) => tool.name === "noob_open_console");
-    expect(open?._meta?.ui).toMatchObject({ resourceUri: "ui://noob/operator-console/v1/index.html" });
+    expect(open?._meta?.ui).toMatchObject({ resourceUri: "ui://noob/operator-console/v2/index.html" });
+    expect(open?.inputSchema.properties?.tab).toMatchObject({
+      default: "live",
+      enum: ["live", "storage", "health"],
+    });
     const poll = listed.tools.find((tool) => tool.name === "noob_widget_poll_frame");
     expect(poll?._meta?.ui).toMatchObject({ visibility: ["app"] });
     const type = listed.tools.find((tool) => tool.name === "noob_type_text");
     expect(type?.annotations).toMatchObject({ destructiveHint: true, idempotentHint: false });
     const media = listed.tools.find((tool) => tool.name === "noob_list_media");
     expect(media?.inputSchema.properties?.cursor).toMatchObject({ maxLength: 128 });
+    const saveScreenshot = listed.tools.find((tool) => tool.name === "noob_save_screenshot");
+    expect(saveScreenshot?.inputSchema.properties?.source_id).toMatchObject({ const: "environment" });
     const stop = listed.tools.find((tool) => tool.name === "noob_stop_recording");
     expect(stop?.description).toContain("Cancels");
     expect(stop?.description).not.toContain("finalizes");
@@ -49,6 +55,21 @@ describe("MCP contract", () => {
     expect(clipFrame?.inputSchema.properties?.frame_index).toMatchObject({
       minimum: 0,
       maximum: 149,
+    });
+
+    const opened = await client.callTool({
+      name: "noob_open_console",
+      arguments: {
+        device_id: `noob_${"a".repeat(16)}`,
+        initial_source_id: "environment",
+        tab: "storage",
+      },
+    });
+    expect(opened.structuredContent).toMatchObject({
+      device_id: `noob_${"a".repeat(16)}`,
+      initial_source_id: "environment",
+      tab: "storage",
+      ui_version: "2",
     });
 
     await client.close();

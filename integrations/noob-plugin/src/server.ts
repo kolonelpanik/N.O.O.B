@@ -25,7 +25,7 @@ import {
   WriteAnnotations,
 } from "./schemas.js";
 
-const WIDGET_URI = "ui://noob/operator-console/v1/index.html";
+const WIDGET_URI = "ui://noob/operator-console/v2/index.html";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const widgetPath = path.join(__dirname, "widget", "widget", "operator-console.html");
 
@@ -182,7 +182,7 @@ export function createServer(runtime: NoobRuntime): McpServer {
 
   registerAppTool(server, "noob_open_console", {
     title: "Open the N.O.O.B. operator console",
-    description: "Renders the interactive observe-first N.O.O.B. console. It does not acquire target control or start recording when opened.",
+    description: "Renders the interactive observe-first N.O.O.B. console at the requested live, opaque-ID storage, or independent-proof health view. It does not acquire target control or start recording when opened.",
     inputSchema: z.object({
       device_id: DeviceId,
       initial_source_id: SourceId.default("target"),
@@ -190,7 +190,7 @@ export function createServer(runtime: NoobRuntime): McpServer {
     }).strict(),
     annotations: ReadAnnotations,
     _meta: { ui: { resourceUri: WIDGET_URI }, "openai/outputTemplate": WIDGET_URI },
-  }, handler(async ({ device_id, initial_source_id, tab }) => textResult({ device_id, initial_source_id, tab, ui_version: "1" }, "N.O.O.B. operator console ready.")));
+  }, handler(async ({ device_id, initial_source_id, tab }) => textResult({ device_id, initial_source_id, tab, ui_version: "2" }, "N.O.O.B. operator console ready.")));
 
   server.registerTool("noob_set_camera_streaming", {
     title: "Set environmental camera state",
@@ -208,8 +208,8 @@ export function createServer(runtime: NoobRuntime): McpServer {
   )));
 
   server.registerTool("noob_save_screenshot", {
-    title: "Save a N.O.O.B. screenshot",
-    description: "Explicitly stores a screenshot bound to a fresh frame token. No automatic recording occurs.",
+    title: "Store a N.O.O.B. environmental snapshot",
+    description: "Explicitly stores one environmental-camera screenshot on camera-owned microSD, bound to a fresh environment frame token. This tool never stores Target HDMI frames and no automatic recording occurs.",
     inputSchema: z.object({
       device_id: DeviceId,
       source_id: z.literal("environment"),
@@ -403,7 +403,7 @@ export function createServer(runtime: NoobRuntime): McpServer {
         prefersBorder: true,
         csp: { connectDomains: [], resourceDomains: [] },
       },
-      "openai/widgetDescription": "Authenticated N.O.O.B. observe-first live-view and bounded-control console.",
+      "openai/widgetDescription": "Authenticated N.O.O.B. observe-first live, opaque-ID camera storage, and independent-proof health console.",
       "openai/widgetPrefersBorder": true,
     },
   }, async (): Promise<ReadResourceResult> => ({
