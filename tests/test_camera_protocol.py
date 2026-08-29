@@ -166,6 +166,10 @@ class CameraProtocolTests(unittest.TestCase):
         self.assertIn("httpd_req_async_handler_complete", self.api_source)
         self.assertIn("cJSON_ParseWithLengthOpts", self.api_source)
 
+    def test_http_stream_send_timeout_is_bounded_without_relaxing_receive(self):
+        self.assertIn("config.recv_wait_timeout = 5;", self.api_source)
+        self.assertIn("config.send_wait_timeout = 30;", self.api_source)
+
     def test_storage_is_one_bit_nonformatting_and_atomic(self):
         storage = self.contract["storage"]
         self.assertEqual(storage["width_bits"], 1)

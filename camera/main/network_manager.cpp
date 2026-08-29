@@ -298,6 +298,12 @@ void NetworkManager::maybe_start_private_services() {
         private_services_started_ = true;
     }
 
+    const esp_err_t power_save_error = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (power_save_error != ESP_OK) {
+        ESP_LOGW(kTag, "Disabling Wi-Fi power save failed: %s",
+                 esp_err_to_name(power_save_error));
+    }
+
     if (connected_callback_ != nullptr) {
         const esp_err_t error = connected_callback_(connected_context_);
         if (error != ESP_OK) {

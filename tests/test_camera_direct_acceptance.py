@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -7,6 +8,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +55,8 @@ class CameraState:
         self.sensor_pid = 38
         self.ov2640_verified = True
         self.supported_sensor_verified = True
+        self.stream_mode = "fragmented"
+        self.stream_delay_seconds = 0.2
         self.requests: list[tuple[str, str, str | None]] = []
         self.media: dict[str, str] = {}
 
@@ -210,6 +214,48 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-NOOB-Boot-ID", BOOT_ID)
             self.end_headers()
             self.wfile.write(body)
+        elif path == "/api/v1/camera/stream.mjpg":
+            if not state.enabled:
+                self._error(409, "camera_disabled")
+                return
+            state.sequence += 1
+            body = jpeg(state.sequence)
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "multipart/x-mixed-replace; boundary=noob-camera-boundary",
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if state.stream_mode == "timeout":
+                self.wfile.flush()
+                time.sleep(state.stream_delay_seconds)
+                return
+            part_header = (
+                b"\r\n--noob-camera-boundary\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + f"X-NOOB-Frame-Sequence: {state.sequence}\r\n\r\n".encode(
+                    "ascii"
+                )
+            )
+            if state.stream_mode == "truncated":
+                fragments = (part_header + body[:-2],)
+            else:
+                # Exercise split SOI and EOI markers as well as fragmented
+                # multipart metadata during every successful acceptance run.
+                fragments = (
+                    part_header[:11],
+                    part_header[11:] + body[:1],
+                    body[1:-1],
+                    body[-1:] + b"\r\n",
+                )
+            for fragment in fragments:
+                try:
+                    self.wfile.write(fragment)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
         elif path == "/api/v1/storage":
             self._json(200, state.storage())
         elif path == f"/api/v1/jobs/{JOB_ID}":
@@ -342,7 +388,7 @@ class CameraDirectAcceptanceTests(unittest.TestCase):
             summary = MODULE.run_acceptance(
                 config(server), TOKEN, allow_loopback_for_test=True
             )
-        self.assertEqual(summary, MODULE.AcceptanceSummary(9, 4, "skipped"))
+        self.assertEqual(summary, MODULE.AcceptanceSummary(10, 5, "skipped"))
         rendered = MODULE.result_json("pass", summary=summary)
         for forbidden in (TOKEN, DEVICE_ID, "127.0.0.1"):
             self.assertNotIn(forbidden, rendered)
@@ -354,6 +400,9 @@ class CameraDirectAcceptanceTests(unittest.TestCase):
         self.assertTrue(any(auth == f"Bearer {TOKEN}" for _, _, auth in server.state.requests))
         self.assertTrue(
             any(auth == f"Bearer {MODULE.DUMMY_BEARER}" for _, _, auth in server.state.requests)
+        )
+        self.assertTrue(
+            any(path == "/api/v1/camera/stream.mjpg" for _, path, _ in server.state.requests)
         )
 
     def test_storage_is_opt_in_and_default_never_deletes(self) -> None:
@@ -373,7 +422,32 @@ class CameraDirectAcceptanceTests(unittest.TestCase):
             summary = MODULE.run_acceptance(
                 config(server), TOKEN, allow_loopback_for_test=True
             )
-        self.assertEqual(summary, MODULE.AcceptanceSummary(9, 4, "skipped"))
+        self.assertEqual(summary, MODULE.AcceptanceSummary(10, 5, "skipped"))
+
+    def test_fragmented_mjpeg_frame_is_bounded_and_validated(self) -> None:
+        with ServerContext() as server:
+            client = MODULE.CameraClient(config(server), TOKEN)
+            digest = MODULE.fetch_mjpeg_frame(client)
+            expected = jpeg(server.state.sequence)
+        self.assertEqual(digest, hashlib.sha256(expected).digest())
+
+    def test_truncated_mjpeg_frame_fails_closed(self) -> None:
+        with ServerContext() as server:
+            server.state.stream_mode = "truncated"
+            client = MODULE.CameraClient(config(server), TOKEN)
+            with self.assertRaisesRegex(
+                MODULE.AcceptanceError, "stream_frame_incomplete"
+            ):
+                MODULE.fetch_mjpeg_frame(client)
+
+    def test_mjpeg_frame_timeout_is_bounded(self) -> None:
+        with ServerContext() as server:
+            server.state.stream_mode = "timeout"
+            client = MODULE.CameraClient(config(server, stream_timeout=0.05), TOKEN)
+            with self.assertRaisesRegex(
+                MODULE.AcceptanceError, "stream_frame_timeout"
+            ):
+                MODULE.fetch_mjpeg_frame(client)
 
     def test_unknown_or_contradictory_sensor_evidence_fails_closed(self) -> None:
         with ServerContext() as server:

@@ -359,7 +359,7 @@ esp_err_t ApiServer::start() {
     config.max_open_sockets = 5;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 5;
-    config.send_wait_timeout = 5;
+    config.send_wait_timeout = 30;
     config.uri_match_fn = httpd_uri_match_wildcard;
     ESP_RETURN_ON_ERROR(httpd_start(&server_, &config), kTag,
                         "start private API server");

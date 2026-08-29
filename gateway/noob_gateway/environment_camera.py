@@ -1061,6 +1061,8 @@ class EnvironmentCamera:
         parser = JPEGStreamParser(
             min(self.config.max_frame_bytes, V1_MAX_JPEG_BYTES)
         )
+        published_frames = 0
+        response_reached_eof = True
         try:
             async with self._session.get(
                 self._base_url() + _STREAM_PATH,
@@ -1086,9 +1088,15 @@ class EnvironmentCamera:
                         or not self._remote_enabled
                         or expected_epoch != self._connection_epoch
                     ):
+                        response_reached_eof = False
                         break
                     for frame in parser.feed(chunk):
                         await self._publish_frame(frame, expected_epoch=expected_epoch)
+                        published_frames += 1
+                if response_reached_eof and published_frames == 0:
+                    raise EnvironmentCameraError(
+                        "camera_stream_incomplete", status=502
+                    )
         except TimeoutError:
             raise EnvironmentCameraError("camera_stream_timeout", status=504) from None
         except aiohttp.ClientError:

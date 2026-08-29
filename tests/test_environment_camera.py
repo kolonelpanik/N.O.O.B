@@ -87,6 +87,7 @@ class FakeCameraUpstream:
         self.requests: list[tuple[str, str]] = []
         self.snapshot_redirect = False
         self.snapshot_oversized = False
+        self.stream_chunks: tuple[bytes, ...] | None = None
 
     def _authorize(self, request: web.Request) -> None:
         if request.headers.get("Authorization") != f"Bearer {TOKEN}":
@@ -188,9 +189,11 @@ class FakeCameraUpstream:
             headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
         )
         await response.prepare(request)
-        await response.write(
-            b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + JPEG + b"\r\n"
+        chunks = self.stream_chunks or (
+            b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + JPEG + b"\r\n",
         )
+        for chunk in chunks:
+            await response.write(chunk)
         await asyncio.sleep(0.05)
         return response
 
@@ -440,6 +443,26 @@ class EnvironmentCameraTests(unittest.IsolatedAsyncioTestCase):
         self.camera._activity.set()
         frame = await self.camera.wait_for_frame(-1, timeout=1.0)
         self.assertIsNotNone(frame)
+        await self.camera.release_viewer()
+
+    async def test_stream_eof_without_a_complete_frame_is_diagnostic(self):
+        await self.camera.refresh_status()
+        self.upstream.stream_chunks = (
+            b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + JPEG[:-2],
+        )
+        await self.camera.acquire_viewer()
+
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while (
+            self.camera.status["last_error"] != "camera_stream_incomplete"
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.02)
+
+        self.assertEqual(
+            self.camera.status["last_error"], "camera_stream_incomplete"
+        )
+        self.assertFalse(self.camera.status["frame_ready"])
         await self.camera.release_viewer()
 
     async def test_storage_media_snapshot_clip_and_job_use_opaque_ids(self):

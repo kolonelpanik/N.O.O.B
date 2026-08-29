@@ -80,7 +80,10 @@ DUMMY_BEARER: Final = "noob_acceptance_invalid_token_00000000"
 DUMMY_QUERY: Final = "noob_acceptance_query_dummy"
 MAX_JSON_BYTES: Final = 64 * 1024
 MAX_JPEG_BYTES: Final = 262_144
+MAX_MJPEG_PREFIX_BYTES: Final = 16 * 1024
+STREAM_READ_CHUNK_BYTES: Final = 4096
 MAX_TOKEN_BYTES: Final = 128
+MJPEG_BOUNDARY: Final = re.compile(r"^[A-Za-z0-9'()+_,./:=?-]{1,70}$")
 
 
 class AcceptanceError(RuntimeError):
@@ -104,6 +107,7 @@ class AcceptanceConfig:
     frame_count: int = 3
     request_timeout: float = 3.0
     progress_timeout: float = 6.0
+    stream_timeout: float = 20.0
     storage_test: bool = False
     delete_created_media: bool = False
 
@@ -168,7 +172,11 @@ def validate_config(config: AcceptanceConfig, *, allow_loopback: bool = False) -
         _fail("invalid_device_id")
     if type(config.frame_count) is not int or not 2 <= config.frame_count <= 5:
         _fail("invalid_frame_count")
-    if not 0.5 <= config.request_timeout <= 10 or not 2 <= config.progress_timeout <= 20:
+    if (
+        not 0.5 <= config.request_timeout <= 10
+        or not 2 <= config.progress_timeout <= 20
+        or not 2 <= config.stream_timeout <= 30
+    ):
         _fail("invalid_timeout")
     if config.delete_created_media and not config.storage_test:
         _fail("delete_requires_storage_test")
@@ -461,6 +469,92 @@ def fetch_snapshot(client: CameraClient, expected_boot_id: str) -> Frame:
     return Frame(sequence, boot_id, hashlib.sha256(response.body).digest())
 
 
+def fetch_mjpeg_frame(client: CameraClient) -> bytes:
+    """Read and validate one bounded JPEG from the fixed MJPEG endpoint."""
+
+    connection = http.client.HTTPConnection(
+        client.config.host,
+        client.config.port,
+        timeout=client.config.stream_timeout,
+    )
+    deadline = time.monotonic() + client.config.stream_timeout
+    response: http.client.HTTPResponse | None = None
+    try:
+        connection.request(
+            "GET",
+            "/api/v1/camera/stream.mjpg",
+            headers={
+                "Accept": "multipart/x-mixed-replace",
+                "Accept-Encoding": "identity",
+                "Authorization": f"Bearer {client.token}",
+                "Cache-Control": "no-store",
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            _fail("stream_status")
+        content_type = response.getheader("Content-Type", "")
+        parts = [part.strip() for part in content_type.split(";")]
+        if not parts or parts[0].lower() != "multipart/x-mixed-replace":
+            _fail("stream_content_type")
+        boundaries = []
+        for part in parts[1:]:
+            key, separator, value = part.partition("=")
+            if separator and key.strip().lower() == "boundary":
+                candidate = value.strip()
+                if len(candidate) >= 2 and candidate[0] == candidate[-1] == '"':
+                    candidate = candidate[1:-1]
+                boundaries.append(candidate)
+        if len(boundaries) != 1 or not MJPEG_BOUNDARY.fullmatch(boundaries[0]):
+            _fail("stream_boundary")
+
+        buffered = bytearray()
+        found_start = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _fail("stream_frame_timeout")
+            if connection.sock is not None:
+                connection.sock.settimeout(remaining)
+            chunk = response.read1(STREAM_READ_CHUNK_BYTES)
+            if not chunk:
+                _fail("stream_frame_incomplete")
+            buffered.extend(chunk)
+
+            if not found_start:
+                start = buffered.find(b"\xff\xd8")
+                if start < 0:
+                    if len(buffered) > MAX_MJPEG_PREFIX_BYTES:
+                        _fail("stream_prefix_too_large")
+                    continue
+                if start > MAX_MJPEG_PREFIX_BYTES:
+                    _fail("stream_prefix_too_large")
+                del buffered[:start]
+                found_start = True
+
+            end = buffered.find(b"\xff\xd9", 2)
+            if end >= 0:
+                frame = bytes(buffered[: end + 2])
+                if len(frame) > MAX_JPEG_BYTES:
+                    _fail("stream_frame_too_large")
+                if jpeg_dimensions(frame) != (640, 480):
+                    _fail("stream_frame_dimensions")
+                return hashlib.sha256(frame).digest()
+            if len(buffered) > MAX_JPEG_BYTES:
+                _fail("stream_frame_too_large")
+    except AcceptanceError:
+        raise
+    except TimeoutError:
+        raise AcceptanceError("stream_frame_timeout") from None
+    except (OSError, http.client.HTTPException) as error:
+        raise AcceptanceError("transport_failed") from error
+    finally:
+        if response is not None:
+            response.close()
+        connection.close()
+
+
 def collect_progress(
     client: CameraClient, expected_boot_id: str, count: int, initial: Frame | None = None
 ) -> list[Frame]:
@@ -655,6 +749,8 @@ def run_acceptance(
     validate_ready_camera(camera)
     generation = _integer(camera.get("generation"), "camera_generation")
     checks += 1
+    fetch_mjpeg_frame(client)
+    checks += 1
     initial = fetch_snapshot(client, boot_id)
     frames = collect_progress(client, boot_id, config.frame_count, initial)
     checks += 2
@@ -707,7 +803,7 @@ def run_acceptance(
             client, enabled_generation, delete_created=config.delete_created_media
         )
         checks += 1
-    return AcceptanceSummary(checks=checks, frames=config.frame_count + 1, storage=storage)
+    return AcceptanceSummary(checks=checks, frames=config.frame_count + 2, storage=storage)
 
 
 def result_json(
@@ -733,6 +829,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--expected-device-id", required=True)
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--frames", type=int, default=3)
+    parser.add_argument("--stream-timeout", type=float, default=20.0)
     parser.add_argument("--storage-test", action="store_true")
     parser.add_argument("--delete-created-media", action="store_true")
     return parser.parse_args(argv)
@@ -748,6 +845,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             port=args.port,
             expected_device_id=args.expected_device_id,
             frame_count=args.frames,
+            stream_timeout=args.stream_timeout,
             storage_test=args.storage_test,
             delete_created_media=args.delete_created_media,
         )

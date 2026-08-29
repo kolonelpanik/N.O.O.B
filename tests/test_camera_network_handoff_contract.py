@@ -55,3 +55,23 @@ def test_callback_reports_api_bind_result_and_state_is_explicit() -> None:
     assert "bool private_services_started_{false};" in header
     assert "esp_err_t start_api_after_ip(void *)" in app
     assert "return error;" in app
+
+
+def test_station_power_save_is_disabled_once_at_the_shared_private_handoff() -> None:
+    source = NETWORK_SOURCE.read_text(encoding="utf-8")
+    gate = _function(
+        source,
+        "void NetworkManager::maybe_start_private_services()",
+        "esp_err_t NetworkManager::start_mdns()",
+    )
+    assert source.count("esp_wifi_set_ps(WIFI_PS_NONE)") == 1
+    reserve = gate.index("private_services_started_ = true")
+    disable = gate.index("esp_wifi_set_ps(WIFI_PS_NONE)")
+    callback = gate.index("connected_callback_(")
+    assert reserve < disable < callback
+    failure_path = gate[disable:callback]
+    assert "power_save_error != ESP_OK" in failure_path
+    assert "ESP_LOGW" in failure_path
+    assert "ESP_ERROR_CHECK" not in failure_path
+    assert "ESP_RETURN_ON_ERROR" not in failure_path
+    assert "return" not in failure_path
