@@ -57,6 +57,7 @@ export default function App() {
     operator.authenticated,
     operator.status?.environment_camera,
   );
+  const environmentConfigured = operator.status?.environment_camera?.configured === true;
   const environmentReady = environment.camera?.frame_ready === true;
   const streamReady = source === "target"
     ? operator.status?.video.ready === true
@@ -83,6 +84,15 @@ export default function App() {
     document.addEventListener("fullscreenchange", update);
     return () => document.removeEventListener("fullscreenchange", update);
   }, []);
+
+  useEffect(() => {
+    if (!environmentConfigured && source === "environment") {
+      setSource("target");
+      setFit(true);
+      setZoomPercent(100);
+      setSourceError(null);
+    }
+  }, [environmentConfigured, source]);
 
   const changeSource = useCallback(async (nextSource: VideoSource) => {
     if (nextSource === source || sourceBusy) return;
@@ -198,7 +208,7 @@ export default function App() {
       <SourceTabs
         source={source}
         busy={sourceBusy}
-        environmentConfigured={environment.camera?.configured === true}
+        environmentConfigured={environmentConfigured}
         error={sourceError}
         onChange={(nextSource) => void changeSource(nextSource)}
       />

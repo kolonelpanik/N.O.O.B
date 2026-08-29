@@ -35,7 +35,7 @@ export function deriveProofModules(
   const videoReady = status?.video.ready === true;
   const environment = status?.environment_camera;
   const environmentReady = environment?.frame_ready === true;
-  return [
+  const modules: ProofModuleModel[] = [
     {
       id: "session",
       title: "Session",
@@ -115,4 +115,7 @@ export function deriveProofModules(
       ],
     },
   ];
+  return modules.filter(
+    (module) => module.id !== "environment" || environment?.configured === true,
+  );
 }

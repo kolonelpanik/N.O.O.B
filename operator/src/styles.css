@@ -1555,6 +1555,11 @@ select:disabled {
   padding: 17px 24px;
 }
 
+.proof-modules--core {
+  grid-template-columns: repeat(5, minmax(190px, 1fr));
+  min-width: 1214px;
+}
+
 .proof-module {
   position: relative;
   z-index: 1;

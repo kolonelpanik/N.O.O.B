@@ -1760,6 +1760,8 @@ class NoobLocalConsole:
         self.badges.pack(side="right")
         self.video_badge = self._badge(self.badges, "VIDEO")
         self.camera_badge = self._badge(self.badges, "CAMERA")
+        self.camera_badge_frame = self.camera_badge[0].master
+        self.camera_badge_frame.pack_forget()
         self.hid_badge = self._badge(self.badges, "HID")
         self.control_badge = self._badge(self.badges, "CONTROL")
 
@@ -1791,7 +1793,6 @@ class NoobLocalConsole:
             command=lambda: self._choose_source("environment"),
             state="disabled",
         )
-        self.environment_source_button.pack(side="left", padx=4)
         self.screenshot_button = ttk.Button(
             source_strip,
             text="SCREENSHOT",
@@ -2062,6 +2063,20 @@ class NoobLocalConsole:
     def _set_badge(self, badge: tuple[tk.Label, tk.Label], label: str, state: str, color: str) -> None:
         badge[0].configure(fg=color)
         badge[1].configure(text=f"{label} · {state}", fg=color)
+
+    def _set_environment_ui_visible(self, visible: bool) -> None:
+        if visible:
+            if not self.camera_badge_frame.winfo_manager():
+                self.camera_badge_frame.pack(
+                    side="left", before=self.hid_badge[0].master
+                )
+            if not self.environment_source_button.winfo_manager():
+                self.environment_source_button.pack(
+                    side="left", padx=4, after=self.target_source_button
+                )
+            return
+        self.camera_badge_frame.pack_forget()
+        self.environment_source_button.pack_forget()
 
     def _offer(self, event: tuple[str, Any]) -> None:
         if event[0] == "frame":
@@ -2538,6 +2553,7 @@ class NoobLocalConsole:
         *,
         update_state: bool = True,
     ) -> None:
+        self._set_environment_ui_visible(camera.configured)
         if (
             self.active_clip_job_id is None
             and camera.storage.active_job_id is not None
@@ -2558,11 +2574,6 @@ class NoobLocalConsole:
             self.photo = None
             self._render_current_frame()
         if not camera.configured:
-            self._set_badge(self.camera_badge, "CAMERA", "NOT SET", MUTED)
-            self.camera_detail.configure(
-                text="No environment camera is configured on this appliance",
-                fg=MUTED,
-            )
             if self.source == "environment":
                 self._apply_source("target")
             return

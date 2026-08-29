@@ -16,10 +16,14 @@ const icons: Record<ProofModuleModel["id"], LucideIcon> = {
 };
 
 export function ProofRail({ modules }: ProofRailProps) {
+  const moduleClassName = modules.length === 5
+    ? "proof-modules proof-modules--core"
+    : "proof-modules";
+
   return (
     <section className="proof-rail" aria-label="End-to-end proof rail">
       <div className="proof-line" aria-hidden="true" />
-      <div className="proof-modules">
+      <div className={moduleClassName}>
         {modules.map((module) => {
           const Icon = icons[module.id];
           return (

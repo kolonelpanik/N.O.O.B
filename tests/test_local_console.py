@@ -336,6 +336,58 @@ class LocalConsoleContractTests(unittest.TestCase):
                 {**base, "environment_camera": malformed}
             )
 
+    def test_optional_camera_controls_and_status_follow_gateway_configuration(self):
+        class Widget:
+            def __init__(self, manager="pack"):
+                self.manager = manager
+                self.pack_calls = []
+
+            def winfo_manager(self):
+                return self.manager
+
+            def pack(self, **kwargs):
+                self.manager = "pack"
+                self.pack_calls.append(kwargs)
+
+            def pack_forget(self):
+                self.manager = ""
+
+        class Label:
+            def __init__(self, master):
+                self.master = master
+
+        console = MODULE.NoobLocalConsole.__new__(MODULE.NoobLocalConsole)
+        console.camera_badge_frame = Widget()
+        hid_frame = Widget()
+        console.hid_badge = (Label(hid_frame), Label(hid_frame))
+        console.environment_source_button = Widget()
+        console.target_source_button = Widget()
+        console.active_clip_job_id = None
+        console.source = "target"
+        console.media_preview_item = None
+
+        visibility = mock.Mock()
+        console._set_environment_ui_visible = visibility
+        console._apply_environment_state(
+            MODULE.EnvironmentCameraState.unconfigured(), update_state=False
+        )
+        visibility.assert_called_once_with(False)
+
+        MODULE.NoobLocalConsole._set_environment_ui_visible(console, False)
+        self.assertEqual(console.camera_badge_frame.winfo_manager(), "")
+        self.assertEqual(console.environment_source_button.winfo_manager(), "")
+
+        MODULE.NoobLocalConsole._set_environment_ui_visible(console, True)
+        self.assertEqual(console.camera_badge_frame.winfo_manager(), "pack")
+        self.assertEqual(console.environment_source_button.winfo_manager(), "pack")
+        self.assertIs(
+            console.camera_badge_frame.pack_calls[-1]["before"], hid_frame
+        )
+        self.assertIs(
+            console.environment_source_button.pack_calls[-1]["after"],
+            console.target_source_button,
+        )
+
     def test_environment_camera_and_storage_contracts_are_bounded(self):
         camera = MODULE.environment_camera_from_response(
             {"ok": True, "environment_camera": environment_payload()}

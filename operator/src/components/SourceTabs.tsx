@@ -31,20 +31,22 @@ export function SourceTabs({
           <Monitor size={16} strokeWidth={1.8} />
           Target
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={source === "environment"}
-          className={source === "environment" ? "source-tab source-tab--active" : "source-tab"}
-          disabled={busy || !environmentConfigured}
-          onClick={() => onChange("environment")}
-        >
-          <Video size={16} strokeWidth={1.8} />
-          Environment
-        </button>
+        {environmentConfigured && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={source === "environment"}
+            className={source === "environment" ? "source-tab source-tab--active" : "source-tab"}
+            disabled={busy}
+            onClick={() => onChange("environment")}
+          >
+            <Video size={16} strokeWidth={1.8} />
+            Environment
+          </button>
+        )}
       </div>
       <div className="source-switch-state" aria-live="polite">
-        {busy ? "Safely releasing target input…" : error ?? (!environmentConfigured ? "Camera not configured" : "")}
+        {busy ? "Safely releasing target input…" : error ?? ""}
       </div>
     </div>
   );

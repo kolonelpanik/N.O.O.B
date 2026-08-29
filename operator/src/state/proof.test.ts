@@ -53,6 +53,42 @@ const healthyStatus: GatewayStatus = {
   control: { active: false, expires_in_ms: 0, release_required: false },
 };
 
+const environmentCameraStatus: NonNullable<GatewayStatus["environment_camera"]> = {
+  configured: true,
+  reachable: true,
+  device_id: `cam_${"a".repeat(16)}`,
+  stream_enabled: true,
+  sensor_enabled: true,
+  sensor_initialized: true,
+  power_control: false,
+  frame_ready: true,
+  generation: 1,
+  sequence: 1,
+  width: 640,
+  height: 480,
+  last_frame_age_ms: 10,
+  viewers: 1,
+  storage: {
+    state: "mounted",
+    mounted: true,
+    writable: true,
+    total_bytes: 100,
+    free_bytes: 50,
+    reserve_bytes: 5,
+    media_count: 1,
+    active_job_id: null,
+    limits: {
+      max_media_items: 10,
+      max_total_bytes: 100,
+      max_clip_duration_ms: 30_000,
+      max_clip_fps: 5,
+      max_clip_frames: 150,
+    },
+    last_error: null,
+  },
+  last_error: null,
+};
+
 describe("proof rail truth projection", () => {
   it("never infers target acceptance or unreported baud/HID availability", () => {
     const modules = deriveProofModules(healthyStatus, true, new Date("2026-08-27T12:00:00Z"));
@@ -66,44 +102,19 @@ describe("proof rail truth projection", () => {
     expect(modules.every((module) => module.state === "—")).toBe(true);
   });
 
+  it("omits optional camera status when the gateway reports the feature unconfigured", () => {
+    const modules = deriveProofModules({
+      ...healthyStatus,
+      environment_camera: { ...environmentCameraStatus, configured: false },
+    }, true, null);
+
+    expect(modules.find((module) => module.id === "environment")).toBeUndefined();
+  });
+
   it("reports environmental stream and microSD proof without claiming physical power control", () => {
     const modules = deriveProofModules({
       ...healthyStatus,
-      environment_camera: {
-        configured: true,
-        reachable: true,
-        device_id: `cam_${"a".repeat(16)}`,
-        stream_enabled: true,
-        sensor_enabled: true,
-        sensor_initialized: true,
-        power_control: false,
-        frame_ready: true,
-        generation: 1,
-        sequence: 1,
-        width: 640,
-        height: 480,
-        last_frame_age_ms: 10,
-        viewers: 1,
-        storage: {
-          state: "mounted",
-          mounted: true,
-          writable: true,
-          total_bytes: 100,
-          free_bytes: 50,
-          reserve_bytes: 5,
-          media_count: 1,
-          active_job_id: null,
-          limits: {
-            max_media_items: 10,
-            max_total_bytes: 100,
-            max_clip_duration_ms: 30_000,
-            max_clip_fps: 5,
-            max_clip_frames: 150,
-          },
-          last_error: null,
-        },
-        last_error: null,
-      },
+      environment_camera: environmentCameraStatus,
     }, true, null);
 
     expect(modules.find((module) => module.id === "environment")).toMatchObject({
