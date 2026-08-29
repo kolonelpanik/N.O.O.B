@@ -24,6 +24,19 @@ afterEach(() => {
 
 describe("frame proof binding", () => {
   it.each([
+    ["target", "x-noob-video-generation", 4_000],
+    ["environment", "x-noob-environment-generation", 35_000],
+  ] as const)("uses the bounded %s frame deadline", async (source, header, timeoutMs) => {
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    vi.stubGlobal("fetch", vi.fn(async () => frameResponse({ [header]: "17" })));
+
+    await new GatewayApi("http://127.0.0.1:8765", "t".repeat(48)).frame(source);
+
+    expect(timeoutSpy).toHaveBeenCalledOnce();
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), timeoutMs);
+  });
+
+  it.each([
     ["target", "x-noob-video-generation"],
     ["environment", "x-noob-environment-generation"],
   ] as const)("binds %s proof to its exact response generation header", async (source, header) => {

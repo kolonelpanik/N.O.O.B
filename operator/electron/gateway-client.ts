@@ -19,6 +19,7 @@ import type {
 const TOKEN_PATTERN = /^[\x21-\x7e]{32,256}$/;
 const LEASE_PATTERN = /^[0-9a-f]{32}$/;
 const REQUEST_TIMEOUT_MS = 4_000;
+const ENVIRONMENT_FRAME_REQUEST_TIMEOUT_MS = 35_000;
 const VIDEO_MODE_REQUEST_TIMEOUT_MS = 65_000;
 const MEDIA_ID_PATTERN = /^m_[0-9a-f]{32}$/;
 const CAMERA_JOB_ID_PATTERN = /^j_[0-9a-f]{32}$/;
@@ -98,7 +99,8 @@ export class GatewayClient {
 
   async frame(source: "target" | "environment" = "target"): Promise<FrameResult> {
     const path = source === "target" ? "/api/v1/frame.jpg" : "/api/v1/environment-camera/frame.jpg";
-    const response = await this.request(path, { method: "GET" });
+    const timeoutMs = source === "target" ? REQUEST_TIMEOUT_MS : ENVIRONMENT_FRAME_REQUEST_TIMEOUT_MS;
+    const response = await this.request(path, { method: "GET" }, timeoutMs);
     const contentType = response.headers.get("content-type")?.split(";", 1)[0];
     if (contentType !== "image/jpeg") {
       throw new GatewayClientError("invalid_frame", response.status);

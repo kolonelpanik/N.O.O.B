@@ -1,6 +1,7 @@
 import type { SourceId } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 4_000;
+const ENVIRONMENT_FRAME_TIMEOUT_MS = 35_000;
 const MAX_JSON_BYTES = 1_048_576;
 const MAX_JPEG_BYTES = 8_388_608;
 
@@ -106,7 +107,8 @@ export class GatewayApi {
 
   async frame(source: SourceId): Promise<GatewayFrame> {
     const proofStartedAtMs = Date.now();
-    const response = await this.request(framePath(source));
+    const timeoutMs = source === "target" ? DEFAULT_TIMEOUT_MS : ENVIRONMENT_FRAME_TIMEOUT_MS;
+    const response = await this.request(framePath(source), {}, timeoutMs);
     const type = response.headers.get("content-type")?.split(";", 1)[0];
     if (type !== "image/jpeg") throw new GatewayError("invalid_frame_content_type", response.status);
     const bytes = await boundedBody(response, MAX_JPEG_BYTES);

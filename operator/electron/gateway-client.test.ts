@@ -194,6 +194,26 @@ describe("GatewayClient capture output", () => {
 });
 
 describe("GatewayClient environmental camera", () => {
+  it.each([
+    ["target", "/api/v1/frame.jpg", 4_000],
+    ["environment", "/api/v1/environment-camera/frame.jpg", 35_000],
+  ] as const)("uses the bounded %s frame deadline", async (source, path, timeoutMs) => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => new AbortController().signal);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {
+      headers: { "Content-Type": "image/jpeg" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new GatewayClient("http://127.0.0.1:18765");
+    client.setToken(TOKEN);
+
+    await client.frame(source);
+
+    expect(timeoutSpy).toHaveBeenCalledOnce();
+    expect(timeoutSpy).toHaveBeenCalledWith(timeoutMs);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toBe(`http://127.0.0.1:18765${path}`);
+  });
+
   it("uses only the bounded generation-checked mutation envelopes and never attaches a control lease", async () => {
     const mediaId = `m_${"b".repeat(32)}`;
     const jobId = `j_${"c".repeat(32)}`;
