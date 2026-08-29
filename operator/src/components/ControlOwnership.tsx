@@ -40,7 +40,9 @@ export function ControlOwnership({
         {claimed ? "Release control" : "Take control"}
       </button>
       <p className="ownership-note">
-        This Mac's keyboard and pointer are not sent to the target until you take control.
+        {claimed
+          ? "Direct keyboard and mouse control stays active while this window is focused. Press Esc to release."
+          : "Take control switches from the uConsole and captures this Mac's keyboard and mouse in one step."}
       </p>
     </section>
   );

@@ -208,7 +208,283 @@ async function renderController(bridge: NoobBridge) {
 afterEach(() => {
   cleanup();
   Reflect.deleteProperty(window, "noob");
+  Reflect.deleteProperty(document, "pointerLockElement");
+  Reflect.deleteProperty(document, "exitPointerLock");
   vi.restoreAllMocks();
+});
+
+function installPointerLockHarness() {
+  let lockedElement: Element | null = null;
+  const target = document.createElement("div");
+  const requestPointerLock = vi.fn(async () => {
+    lockedElement = target;
+    document.dispatchEvent(new Event("pointerlockchange"));
+  });
+  const exitPointerLock = vi.fn(() => {
+    lockedElement = null;
+    document.dispatchEvent(new Event("pointerlockchange"));
+  });
+  Object.defineProperty(target, "requestPointerLock", {
+    configurable: true,
+    value: requestPointerLock,
+  });
+  Object.defineProperty(document, "pointerLockElement", {
+    configurable: true,
+    get: () => lockedElement,
+  });
+  Object.defineProperty(document, "exitPointerLock", {
+    configurable: true,
+    value: exitPointerLock,
+  });
+
+  return { target, requestPointerLock, exitPointerLock };
+}
+
+describe("one-click direct control", () => {
+  it("requests pointer lock in the trusted click turn, then enables human keyboard and pointer capture after claim", async () => {
+    let resolveClaim!: (value: { ok: true; ttlMs: number }) => void;
+    const bridge = mockBridge();
+    vi.mocked(bridge.claimControl).mockReturnValueOnce(new Promise((resolve) => {
+      resolveClaim = resolve;
+    }));
+    const pointerLock = installPointerLockHarness();
+    const { result, unmount } = await renderController(bridge);
+
+    await act(() => result.current.setMode("agent"));
+    let takePromise!: Promise<void>;
+    act(() => {
+      takePromise = result.current.takeDirectControl(pointerLock.target);
+    });
+
+    expect(pointerLock.requestPointerLock).toHaveBeenCalledOnce();
+    expect(bridge.claimControl).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(bridge.claimControl).toHaveBeenCalledOnce();
+    expect(pointerLock.requestPointerLock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(bridge.claimControl).mock.invocationCallOrder[0],
+    );
+    expect(result.current.claimed).toBe(false);
+    expect(result.current.keyboardCapture).toBe(false);
+    expect(result.current.pointerCapture).toBe(false);
+
+    await act(async () => {
+      resolveClaim({ ok: true, ttlMs: 5_000 });
+      await takePromise;
+    });
+
+    expect(result.current.claimed).toBe(true);
+    expect(result.current.mode).toBe("human");
+    expect(result.current.keyboardCapture).toBe(true);
+    expect(result.current.pointerCapture).toBe(true);
+    expect(result.current.pointerLocked).toBe(true);
+    unmount();
+  });
+
+  it("releases a provisional pointer lock and leaves capture off when the gateway claim fails", async () => {
+    const bridge = mockBridge();
+    vi.mocked(bridge.claimControl).mockRejectedValueOnce(new Error("control unavailable"));
+    const pointerLock = installPointerLockHarness();
+    const { result, unmount } = await renderController(bridge);
+
+    await act(() => result.current.takeDirectControl(pointerLock.target));
+
+    expect(pointerLock.requestPointerLock).toHaveBeenCalledOnce();
+    expect(pointerLock.exitPointerLock).toHaveBeenCalledOnce();
+    expect(result.current.claimed).toBe(false);
+    expect(result.current.keyboardCapture).toBe(false);
+    expect(result.current.pointerCapture).toBe(false);
+    expect(result.current.pointerLocked).toBe(false);
+    expect(result.current.lastAction).toBe("Control unavailable");
+    unmount();
+  });
+
+  it("clears automatic keyboard and pointer capture on explicit release", async () => {
+    const bridge = mockBridge();
+    const pointerLock = installPointerLockHarness();
+    const { result, unmount } = await renderController(bridge);
+
+    await act(() => result.current.takeDirectControl(pointerLock.target));
+    expect(result.current.keyboardCapture).toBe(true);
+    expect(result.current.pointerCapture).toBe(true);
+
+    await act(() => result.current.releaseControl());
+
+    expect(bridge.releaseControl).toHaveBeenCalledOnce();
+    expect(pointerLock.exitPointerLock).toHaveBeenCalledOnce();
+    expect(result.current.claimed).toBe(false);
+    expect(result.current.keyboardCapture).toBe(false);
+    expect(result.current.pointerCapture).toBe(false);
+    expect(result.current.pointerLocked).toBe(false);
+    unmount();
+  });
+
+  it("clears automatic keyboard and pointer capture when the operator window loses focus", async () => {
+    const bridge = mockBridge();
+    const pointerLock = installPointerLockHarness();
+    const { result, unmount } = await renderController(bridge);
+
+    await act(() => result.current.takeDirectControl(pointerLock.target));
+    expect(result.current.keyboardCapture).toBe(true);
+    expect(result.current.pointerCapture).toBe(true);
+
+    act(() => window.dispatchEvent(new Event("blur")));
+
+    expect(pointerLock.exitPointerLock).toHaveBeenCalledOnce();
+    expect(result.current.claimed).toBe(false);
+    expect(result.current.keyboardCapture).toBe(false);
+    expect(result.current.pointerCapture).toBe(false);
+    expect(result.current.pointerLocked).toBe(false);
+    unmount();
+  });
+
+  it("disarms authoritative local ownership before claiming direct control", async () => {
+    let resolveDisarm!: (value: GatewayLocalInputResult) => void;
+    const armed = {
+      ...LOCAL_READY,
+      armed: true,
+      exclusive_grab: true,
+      disarm_reason: null,
+    };
+    const bridge = mockBridge(gatewayStatus(armed));
+    vi.mocked(bridge.disarmLocalInput).mockReturnValueOnce(new Promise((resolve) => {
+      resolveDisarm = resolve;
+    }));
+    const pointerLock = installPointerLockHarness();
+    const { result, unmount } = await renderController(bridge);
+
+    let takePromise!: Promise<void>;
+    act(() => {
+      takePromise = result.current.takeDirectControl(pointerLock.target);
+    });
+
+    expect(pointerLock.requestPointerLock).toHaveBeenCalledOnce();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(bridge.disarmLocalInput).toHaveBeenCalledOnce();
+    expect(bridge.claimControl).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveDisarm(localResult(LOCAL_READY));
+      await takePromise;
+    });
+
+    expect(bridge.claimControl).toHaveBeenCalledOnce();
+    expect(pointerLock.requestPointerLock).toHaveBeenCalledOnce();
+    expect(vi.mocked(bridge.disarmLocalInput).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(bridge.claimControl).mock.invocationCallOrder[0],
+    );
+    expect(result.current.status?.local_input).toMatchObject({
+      armed: false,
+      exclusive_grab: false,
+    });
+    expect(result.current.claimed).toBe(true);
+    expect(result.current.mode).toBe("human");
+    expect(result.current.keyboardCapture).toBe(true);
+    expect(result.current.pointerCapture).toBe(true);
+    expect(result.current.pointerLocked).toBe(true);
+    unmount();
+  });
+
+  it("leaves local ownership untouched when the trusted pointer-lock request is denied", async () => {
+    const armed = {
+      ...LOCAL_READY,
+      armed: true,
+      exclusive_grab: true,
+      disarm_reason: null,
+    };
+    const bridge = mockBridge(gatewayStatus(armed));
+    const pointerLock = installPointerLockHarness();
+    pointerLock.requestPointerLock.mockRejectedValueOnce(new Error("pointer lock denied"));
+    const { result, unmount } = await renderController(bridge);
+
+    await act(() => result.current.takeDirectControl(pointerLock.target));
+
+    expect(pointerLock.requestPointerLock).toHaveBeenCalledOnce();
+    expect(bridge.disarmLocalInput).not.toHaveBeenCalled();
+    expect(bridge.claimControl).not.toHaveBeenCalled();
+    expect(bridge.releaseControl).not.toHaveBeenCalled();
+    expect(result.current.status?.local_input).toMatchObject({
+      armed: true,
+      exclusive_grab: true,
+    });
+    expect(result.current.claimed).toBe(false);
+    expect(result.current.keyboardCapture).toBe(false);
+    expect(result.current.pointerCapture).toBe(false);
+    expect(result.current.pointerLocked).toBe(false);
+    expect(result.current.lastAction).toBe("Pointer lock unavailable");
+    unmount();
+  });
+
+  it("stops before remote claim when the authoritative local disarm remains grabbed", async () => {
+    const armed = {
+      ...LOCAL_READY,
+      armed: true,
+      exclusive_grab: true,
+      disarm_reason: null,
+    };
+    const bridge = mockBridge(gatewayStatus(armed));
+    vi.mocked(bridge.disarmLocalInput).mockResolvedValueOnce(localResult(armed));
+    const pointerLock = installPointerLockHarness();
+    const { result, unmount } = await renderController(bridge);
+
+    await act(() => result.current.takeDirectControl(pointerLock.target));
+
+    expect(pointerLock.requestPointerLock).toHaveBeenCalledOnce();
+    expect(bridge.disarmLocalInput).toHaveBeenCalledOnce();
+    expect(bridge.claimControl).not.toHaveBeenCalled();
+    expect(bridge.releaseControl).not.toHaveBeenCalled();
+    expect(pointerLock.exitPointerLock).toHaveBeenCalledOnce();
+    expect(result.current.status?.local_input).toMatchObject({
+      armed: true,
+      exclusive_grab: true,
+    });
+    expect(result.current.claimed).toBe(false);
+    expect(result.current.keyboardCapture).toBe(false);
+    expect(result.current.pointerCapture).toBe(false);
+    expect(result.current.pointerLocked).toBe(false);
+    expect(result.current.localInputError).toBe("local_input_disarm_unconfirmed");
+    expect(result.current.lastAction).toBe("uConsole disarm unconfirmed");
+    unmount();
+  });
+
+  it("releases a late remote lease when the operator window blurs during claim", async () => {
+    let resolveClaim!: (value: { ok: true; ttlMs: number }) => void;
+    const bridge = mockBridge();
+    vi.mocked(bridge.claimControl).mockReturnValueOnce(new Promise((resolve) => {
+      resolveClaim = resolve;
+    }));
+    const pointerLock = installPointerLockHarness();
+    const { result, unmount } = await renderController(bridge);
+
+    let takePromise!: Promise<void>;
+    act(() => {
+      takePromise = result.current.takeDirectControl(pointerLock.target);
+    });
+    await waitFor(() => expect(bridge.claimControl).toHaveBeenCalledOnce());
+
+    act(() => window.dispatchEvent(new Event("blur")));
+    expect(pointerLock.exitPointerLock).toHaveBeenCalledOnce();
+    expect(result.current.claimed).toBe(false);
+    expect(result.current.keyboardCapture).toBe(false);
+    expect(result.current.pointerCapture).toBe(false);
+
+    await act(async () => {
+      resolveClaim({ ok: true, ttlMs: 5_000 });
+      await takePromise;
+    });
+
+    expect(bridge.releaseControl).toHaveBeenCalledOnce();
+    expect(result.current.claimed).toBe(false);
+    expect(result.current.keyboardCapture).toBe(false);
+    expect(result.current.pointerCapture).toBe(false);
+    expect(result.current.pointerLocked).toBe(false);
+    unmount();
+  });
 });
 
 describe("operator local-input ownership", () => {

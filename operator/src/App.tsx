@@ -273,12 +273,12 @@ export default function App() {
           claimed={operator.claimed}
           claimBlocked={
             sourceBusy ||
-            operator.localInputBusy ||
-            operator.status?.local_input.armed === true ||
-            operator.status?.local_input.exclusive_grab === true
+            operator.localInputBusy
           }
           leaseRemainingMs={operator.leaseRemainingMs}
-          onClaim={() => void operator.claimControl()}
+          onClaim={() => {
+            if (targetRef.current) void operator.takeDirectControl(targetRef.current);
+          }}
           onRelease={() => void operator.releaseControl()}
         />
         <LocalInputControl

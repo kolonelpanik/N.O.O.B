@@ -157,6 +157,14 @@ stay in Electron's main process; they are not placed in renderer storage. An
 optional inherited-stdin bootstrap avoids putting the token in arguments,
 environment variables, the clipboard, or shell history.
 
+For normal Mac operation, **Take control** is one action: the app requests
+relative pointer lock from that trusted click, releases any uConsole-local
+input grab, verifies the handoff, claims the remote lease, and enables keyboard
+and pointer capture together. The individual capture controls remain available
+as advanced opt-out and recovery controls. Pressing **Escape**, leaving the
+operator window, losing the lease, or using the global release action clears
+the complete input state.
+
 The built-in uConsole controls are a separate mode. They remain inert until an
 authenticated arm request succeeds, then the configured keyboard and trackball
 are grabbed together so one physical event cannot affect both the appliance
@@ -277,7 +285,7 @@ MacBook target:
 | Local controls | uConsole keyboard and trackball forwarded through the shared lease; native left, right, and middle mapping retained |
 | Desktop operator | Live Electron view, authenticated ownership, safe release, and automatic stream recovery after a gateway restart |
 | Agent path | Bounded API opened Chrome, created a tab, navigated to YouTube, and was verified through a fresh capture frame |
-| Automated checks | 198 Python gateway/Pico/camera tests (plus 60 subtests), 123 Electron tests across 23 files, and 63 agent-plugin tests across 11 files passing; Electron lint/build/package verification, plugin typecheck/build, lock checks, and both npm dependency audits clean |
+| Automated checks | 198 Python gateway/Pico/camera tests (plus 60 subtests), 139 Electron tests across 24 files, and 63 agent-plugin tests across 11 files passing; Electron lint/build/package verification, plugin typecheck/build, lock checks, and both npm dependency audits clean |
 
 This is a working prototype, not a certification claim. The full reboot and
 failure-injection matrix in [Acceptance](docs/acceptance.md) remains the bar for

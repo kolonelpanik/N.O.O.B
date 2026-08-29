@@ -83,6 +83,20 @@ the route only when the newly observed full SSH key matches the existing pin.
 Unknown or changed keys are never accepted automatically; the app remains
 disconnected and requires a new explicit trust decision.
 
+## One-click direct control
+
+With the target feed live, choose **Take control** once. That trusted click
+requests relative pointer lock, disarms and verifies any active uConsole-local
+keyboard/trackball grab, claims the Mac operator lease, selects Human mode, and
+enables keyboard and pointer capture together. The separate capture toggles
+remain available for advanced opt-out and recovery, but they are not part of
+the normal startup path.
+
+Direct control remains active only while the N.O.O.B. window stays focused.
+Press **Escape** or **RELEASE ALL INPUT** to release immediately. Focus loss,
+pointer-lock loss during acquisition, an unconfirmed uConsole handoff, a stale
+claim, and lease or serial failure all fail closed and clear captured input.
+
 Version-1 Electron camelCase and plugin snake_case stores are migrated in
 place under a cross-process lock. Migration preserves valid devices and an
 existing default; a sole legacy Electron pin becomes the default. Duplicate

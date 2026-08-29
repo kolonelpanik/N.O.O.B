@@ -58,6 +58,7 @@ export interface OperatorController {
   bootstrapToken(token: string): Promise<boolean>;
   clearToken(): Promise<void>;
   claimControl(): Promise<void>;
+  takeDirectControl(element: HTMLElement): Promise<void>;
   releaseControl(): Promise<boolean>;
   emergencyRelease(): Promise<void>;
   armLocalInput(): Promise<void>;
@@ -553,6 +554,120 @@ export function useOperatorController(): OperatorController {
     }
   }, [applyLocalRelease, connection, status?.local_input]);
 
+  const takeDirectControl = useCallback(async (element: HTMLElement) => {
+    if (
+      !authenticatedRef.current ||
+      claimedRef.current ||
+      ownershipTransitionRef.current !== null
+    ) return;
+
+    ownershipTransitionRef.current = "claim";
+    let generation = ++statusMutationGenerationRef.current;
+    let leaseAcquired = false;
+    let failureAction = "Direct control unavailable";
+    setLocalInputBusy(true);
+    setLocalInputError(null);
+
+    try {
+      // Pointer lock must be requested synchronously from the trusted Take
+      // control click. Waiting for either gateway request first would consume
+      // the browser's user-activation window and force a second click.
+      let pointerLockedByClick = false;
+      try {
+        await element.requestPointerLock();
+        pointerLockedByClick = document.pointerLockElement === element;
+      } catch {
+        pointerLockedByClick = false;
+      }
+      if (!pointerLockedByClick) {
+        failureAction = "Pointer lock unavailable";
+        return;
+      }
+      if (!authenticatedRef.current || generation !== statusMutationGenerationRef.current) return;
+
+      // This endpoint is idempotent and releases only the gateway's local
+      // uConsole owner. Its returned snapshot is authoritative, unlike the
+      // one-second status poll that may still show an older ownership state.
+      const disarmResult = await noobApi.disarmLocalInput();
+      if (!authenticatedRef.current || generation !== statusMutationGenerationRef.current) return;
+      const localReleased =
+        disarmResult.local_input.armed !== true &&
+        disarmResult.local_input.exclusive_grab !== true;
+      generation = ++statusMutationGenerationRef.current;
+      setStatus((current) => current === null
+        ? current
+        : { ...current, local_input: disarmResult.local_input });
+      if (!localReleased) {
+        setLocalInputError("local_input_disarm_unconfirmed");
+        failureAction = "uConsole disarm unconfirmed";
+        return;
+      }
+
+      await inputFifoRef.current?.whenIdle();
+      if (
+        !authenticatedRef.current ||
+        generation !== statusMutationGenerationRef.current ||
+        document.pointerLockElement !== element
+      ) return;
+
+      const result = await noobApi.claim();
+      leaseAcquired = true;
+      if (
+        !authenticatedRef.current ||
+        generation !== statusMutationGenerationRef.current ||
+        document.pointerLockElement !== element
+      ) return;
+
+      inputFifoRef.current?.invalidate();
+      claimedRef.current = true;
+      claimStartedAtRef.current = Date.now();
+      leaseTtlRef.current = result.ttlMs;
+      modeRef.current = "human";
+      keyboardCaptureRef.current = true;
+      pointerCaptureRef.current = true;
+      setClaimed(true);
+      setLeaseExpiresAt(Date.now() + result.ttlMs);
+      setLeaseRemainingMs(result.ttlMs);
+      setModeState("human");
+      setKeyboardCapture(true);
+      setPointerCapture(true);
+      setPointerLocked(true);
+      statusMutationGenerationRef.current += 1;
+      setStatus((current) => current === null
+        ? current
+        : {
+            ...current,
+            control: {
+              ...current.control,
+              active: true,
+              expires_in_ms: result.ttlMs,
+            },
+          });
+      setLastAction("Direct control active");
+    } catch (error) {
+      const code = error instanceof OperatorApiError ? error.code : "operator_request_failed";
+      failureAction = code === "release_unconfirmed"
+        ? "uConsole disarm unconfirmed"
+        : "Control unavailable";
+      if (code === "release_unconfirmed") setLocalInputError(code);
+      if (isAuthenticationFailure(error)) {
+        authenticatedRef.current = false;
+        setAuthenticated(false);
+        setStatus(null);
+        setConnection("unauthenticated");
+        setAuthDialogOpen(true);
+        failureAction = "Control lost";
+      }
+    } finally {
+      if (!claimedRef.current) {
+        if (leaseAcquired) await noobApi.release().catch(() => undefined);
+        applyLocalRelease(failureAction);
+      }
+      ownershipTransitionRef.current = null;
+      setLocalInputBusy(false);
+    }
+  }, [applyLocalRelease]);
+
   const switchVideoMode = useCallback(async (modeId: string) => {
     const video = status?.video;
     const selected = videoModes.find((mode) => mode.id === modeId && mode.validated);
@@ -745,9 +860,13 @@ export function useOperatorController(): OperatorController {
   }, [emergencyRelease, sendInput]);
 
   useEffect(() => {
-    const onBlur = () => applyLocalRelease();
+    const onBlur = () => {
+      statusMutationGenerationRef.current += 1;
+      applyLocalRelease();
+    };
     const onPageHide = () => {
       const ownedControl = claimedRef.current;
+      statusMutationGenerationRef.current += 1;
       applyLocalRelease();
       if (authenticatedRef.current && ownedControl) {
         void noobApi.release().catch(() => undefined);
@@ -756,7 +875,10 @@ export function useOperatorController(): OperatorController {
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") onPageHide();
     };
-    const stopListening = noobApi.onControlLost(() => applyLocalRelease("Control lost"));
+    const stopListening = noobApi.onControlLost(() => {
+      statusMutationGenerationRef.current += 1;
+      applyLocalRelease("Control lost");
+    });
     window.addEventListener("blur", onBlur);
     window.addEventListener("pagehide", onPageHide);
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -795,6 +917,7 @@ export function useOperatorController(): OperatorController {
       bootstrapToken,
       clearToken,
       claimControl,
+      takeDirectControl,
       releaseControl,
       emergencyRelease,
       armLocalInput,
@@ -839,6 +962,7 @@ export function useOperatorController(): OperatorController {
       setMode,
       status,
       streamGeneration,
+      takeDirectControl,
       toggleKeyboardCapture,
       togglePointerCapture,
     ],
