@@ -9,7 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gateway"))
 
 from noob_gateway.config import ConfigError, load_config  # noqa: E402
 from noob_gateway.__main__ import SHUTDOWN_TIMEOUT_SECONDS, main  # noqa: E402
-from noob_gateway.models import InputValidationError, validate_input_command  # noqa: E402
+from noob_gateway.models import (  # noqa: E402
+    GATEWAY_MOUSE_AXIS_LIMIT,
+    InputValidationError,
+    mouse_move_chunk_count,
+    validate_input_command,
+)
 
 
 class GatewayModelTests(unittest.TestCase):
@@ -24,6 +29,36 @@ class GatewayModelTests(unittest.TestCase):
             validate_input_command({"op": "ping", "extra": True})
         with self.assertRaisesRegex(InputValidationError, "bad_range"):
             validate_input_command({"op": "mouse_move", "dx": True, "dy": 0, "wheel": 0})
+
+    def test_mouse_aggregate_is_bounded_to_one_uart_batch(self):
+        accepted = validate_input_command(
+            {
+                "op": "mouse_move",
+                "dx": GATEWAY_MOUSE_AXIS_LIMIT,
+                "dy": -GATEWAY_MOUSE_AXIS_LIMIT,
+                "wheel": 127,
+            }
+        )
+        self.assertEqual(mouse_move_chunk_count(accepted), 8)
+
+        for command in (
+            {
+                "op": "mouse_move",
+                "dx": GATEWAY_MOUSE_AXIS_LIMIT + 1,
+                "dy": 0,
+                "wheel": 0,
+            },
+            {
+                "op": "mouse_move",
+                "dx": 0,
+                "dy": -GATEWAY_MOUSE_AXIS_LIMIT - 1,
+                "wheel": 0,
+            },
+            {"op": "mouse_move", "dx": 0, "dy": 0, "wheel": 128},
+        ):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(InputValidationError, "bad_range"):
+                    validate_input_command(command)
 
     def test_non_ascii_and_unknown_keys_are_rejected(self):
         with self.assertRaisesRegex(InputValidationError, "bad_range"):

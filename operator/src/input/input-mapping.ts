@@ -1,4 +1,10 @@
-import type { GatewayInputCommand, MouseButton } from "../../shared/gateway-contract";
+import {
+  GATEWAY_MOUSE_AXIS_MAX,
+  GATEWAY_MOUSE_WHEEL_MAX,
+  HID_MOUSE_DELTA_MAX,
+  type GatewayInputCommand,
+  type MouseButton,
+} from "../../shared/gateway-contract";
 
 const DIGIT_KEYS = ["ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE"];
 
@@ -151,9 +157,9 @@ export function validateGatewayInput(value: unknown): GatewayInputCommand | null
     }
     case "mouse_move":
       return exactKeys(candidate, ["op", "dx", "dy", "wheel"]) &&
-        boundedInteger(candidate.dx, -127, 127) &&
-        boundedInteger(candidate.dy, -127, 127) &&
-        boundedInteger(candidate.wheel, -127, 127)
+        boundedInteger(candidate.dx, -GATEWAY_MOUSE_AXIS_MAX, GATEWAY_MOUSE_AXIS_MAX) &&
+        boundedInteger(candidate.dy, -GATEWAY_MOUSE_AXIS_MAX, GATEWAY_MOUSE_AXIS_MAX) &&
+        boundedInteger(candidate.wheel, -GATEWAY_MOUSE_WHEEL_MAX, GATEWAY_MOUSE_WHEEL_MAX)
         ? (candidate as GatewayInputCommand)
         : null;
     case "mouse_button":
@@ -225,7 +231,7 @@ export function describeInput(command: GatewayInputCommand): string {
 }
 
 function clampAxis(value: number): number {
-  return Math.max(-127, Math.min(127, Math.trunc(value)));
+  return Math.max(-HID_MOUSE_DELTA_MAX, Math.min(HID_MOUSE_DELTA_MAX, Math.trunc(value)));
 }
 
 export function splitRelativeMovement(dx: number, dy: number, wheel: number): GatewayInputCommand[] {
@@ -243,6 +249,68 @@ export function splitRelativeMovement(dx: number, dy: number, wheel: number): Ga
     remainingWheel -= partWheel;
   }
   return commands;
+}
+
+function clampGatewayAxis(value: number): number {
+  return Math.max(
+    -GATEWAY_MOUSE_AXIS_MAX,
+    Math.min(GATEWAY_MOUSE_AXIS_MAX, Math.trunc(value)),
+  );
+}
+
+function clampGatewayWheel(value: number): number {
+  return Math.max(
+    -GATEWAY_MOUSE_WHEEL_MAX,
+    Math.min(GATEWAY_MOUSE_WHEEL_MAX, Math.trunc(value)),
+  );
+}
+
+/**
+ * Split browser-relative motion into bounded logical gateway bursts.
+ *
+ * Each logical burst maps to at most eight ordinary signed-byte Pico reports.
+ * This keeps renderer/HTTP backpressure bounded without widening the UART/HID
+ * protocol itself.
+ */
+export function splitGatewayRelativeMovement(
+  dx: number,
+  dy: number,
+  wheel: number,
+): GatewayInputCommand[] {
+  const commands: GatewayInputCommand[] = [];
+  if (![dx, dy, wheel].every(Number.isFinite)) return commands;
+  let remainingX = Math.trunc(dx);
+  let remainingY = Math.trunc(dy);
+  let remainingWheel = Math.trunc(wheel);
+  while (remainingX !== 0 || remainingY !== 0 || remainingWheel !== 0) {
+    const partX = clampGatewayAxis(remainingX);
+    const partY = clampGatewayAxis(remainingY);
+    const partWheel = clampGatewayWheel(remainingWheel);
+    commands.push({ op: "mouse_move", dx: partX, dy: partY, wheel: partWheel });
+    remainingX -= partX;
+    remainingY -= partY;
+    remainingWheel -= partWheel;
+  }
+  return commands;
+}
+
+export function mergeGatewayMouseMoves(
+  current: GatewayInputCommand,
+  next: GatewayInputCommand,
+): GatewayInputCommand | null {
+  if (current.op !== "mouse_move" || next.op !== "mouse_move") return null;
+  const dx = current.dx + next.dx;
+  const dy = current.dy + next.dy;
+  const wheel = current.wheel + next.wheel;
+  if (
+    !Number.isSafeInteger(dx) ||
+    !Number.isSafeInteger(dy) ||
+    !Number.isSafeInteger(wheel) ||
+    Math.abs(dx) > GATEWAY_MOUSE_AXIS_MAX ||
+    Math.abs(dy) > GATEWAY_MOUSE_AXIS_MAX ||
+    Math.abs(wheel) > GATEWAY_MOUSE_WHEEL_MAX
+  ) return null;
+  return { op: "mouse_move", dx, dy, wheel };
 }
 
 export function validTypeText(text: string): boolean {

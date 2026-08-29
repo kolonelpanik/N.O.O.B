@@ -1,7 +1,10 @@
 import { forwardRef, useCallback, useEffect, useRef, type CSSProperties } from "react";
 import type { GatewayInputCommand } from "../../shared/gateway-contract";
 import type { OperatorMode } from "../hooks/useOperatorController";
-import { mouseButtonFromDom, splitRelativeMovement } from "../input/input-mapping";
+import {
+  mouseButtonFromDom,
+  splitGatewayRelativeMovement,
+} from "../input/input-mapping";
 
 interface LiveTargetProps {
   imageSource: string | null;
@@ -59,8 +62,13 @@ export const LiveTarget = forwardRef<HTMLDivElement, LiveTargetProps>(function L
     frameRequestRef.current = null;
     const pending = pendingRef.current;
     pendingRef.current = { dx: 0, dy: 0, wheel: 0 };
-    const commands = splitRelativeMovement(pending.dx, pending.dy, pending.wheel);
-    for (const command of commands) {
+    for (const command of splitGatewayRelativeMovement(
+      pending.dx,
+      pending.dy,
+      pending.wheel,
+    )) {
+      // The shared controller FIFO coalesces only adjacent mouse movement.
+      // Keyboard and button commands enter that same FIFO as ordering barriers.
       void sendInput(command, false);
     }
   }, [sendInput]);
@@ -74,9 +82,19 @@ export const LiveTarget = forwardRef<HTMLDivElement, LiveTargetProps>(function L
   useEffect(
     () => () => {
       if (frameRequestRef.current !== null) window.cancelAnimationFrame(frameRequestRef.current);
+      pendingRef.current = { dx: 0, dy: 0, wheel: 0 };
     },
     [],
   );
+
+  useEffect(() => {
+    if (active) return;
+    if (frameRequestRef.current !== null) {
+      window.cancelAnimationFrame(frameRequestRef.current);
+      frameRequestRef.current = null;
+    }
+    pendingRef.current = { dx: 0, dy: 0, wheel: 0 };
+  }, [active]);
 
   const onMouseMove = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!active || !pointerLocked) return;
@@ -101,8 +119,8 @@ export const LiveTarget = forwardRef<HTMLDivElement, LiveTargetProps>(function L
     event.preventDefault();
     if (frameRequestRef.current !== null) {
       window.cancelAnimationFrame(frameRequestRef.current);
-      flushPointer();
     }
+    flushPointer();
     void sendInput({ op: "mouse_button", button, event: kind }, false);
   };
 

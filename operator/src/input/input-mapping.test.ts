@@ -3,8 +3,11 @@ import {
   describeInput,
   domCodeToGatewayKey,
   mapKeyboardEvent,
+  mergeGatewayMouseMoves,
   parseAgentPayload,
+  splitGatewayRelativeMovement,
   splitRelativeMovement,
+  validateGatewayInput,
   validTypeText,
 } from "./input-mapping";
 
@@ -58,6 +61,44 @@ describe("input mapping", () => {
       { op: "mouse_move", dx: 127, dy: -73, wheel: 0 },
       { op: "mouse_move", dx: 46, dy: 0, wheel: 0 },
     ]);
+  });
+
+  it("coalesces browser motion into tightly bounded gateway batches", () => {
+    expect(splitGatewayRelativeMovement(300, -200, 0)).toEqual([
+      { op: "mouse_move", dx: 300, dy: -200, wheel: 0 },
+    ]);
+    expect(splitGatewayRelativeMovement(1100, 0, 140)).toEqual([
+      { op: "mouse_move", dx: 1016, dy: 0, wheel: 127 },
+      { op: "mouse_move", dx: 84, dy: 0, wheel: 13 },
+    ]);
+    expect(splitGatewayRelativeMovement(Number.POSITIVE_INFINITY, 0, 0)).toEqual([]);
+  });
+
+  it("merges only adjacent movement that stays inside one gateway burst", () => {
+    expect(
+      mergeGatewayMouseMoves(
+        { op: "mouse_move", dx: 400, dy: -200, wheel: 0 },
+        { op: "mouse_move", dx: 500, dy: 100, wheel: 1 },
+      ),
+    ).toEqual({ op: "mouse_move", dx: 900, dy: -100, wheel: 1 });
+    expect(
+      mergeGatewayMouseMoves(
+        { op: "mouse_move", dx: 1016, dy: 0, wheel: 0 },
+        { op: "mouse_move", dx: 1, dy: 0, wheel: 0 },
+      ),
+    ).toBeNull();
+  });
+
+  it("validates the aggregate HTTP bound without widening wheel reports", () => {
+    expect(
+      validateGatewayInput({ op: "mouse_move", dx: 1016, dy: -1016, wheel: 127 }),
+    ).toEqual({ op: "mouse_move", dx: 1016, dy: -1016, wheel: 127 });
+    expect(
+      validateGatewayInput({ op: "mouse_move", dx: 1017, dy: 0, wheel: 0 }),
+    ).toBeNull();
+    expect(
+      validateGatewayInput({ op: "mouse_move", dx: 0, dy: 0, wheel: 128 }),
+    ).toBeNull();
   });
 
   it("keeps typed content out of action metadata", () => {

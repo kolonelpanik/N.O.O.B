@@ -23,6 +23,10 @@ KEY_NAMES = frozenset(
 MOUSE_BUTTONS = frozenset(("left", "right", "middle"))
 ACTION_TYPE_INTERVAL_DEFAULT_MS = 0
 ACTION_COMBO_HOLD_DEFAULT_MS = 50
+HID_MOUSE_DELTA_LIMIT = 127
+MOUSE_MOVE_BATCH_LIMIT = 8
+GATEWAY_MOUSE_AXIS_LIMIT = HID_MOUSE_DELTA_LIMIT * MOUSE_MOVE_BATCH_LIMIT
+GATEWAY_MOUSE_WHEEL_LIMIT = HID_MOUSE_DELTA_LIMIT
 
 
 class InputValidationError(ValueError):
@@ -111,10 +115,23 @@ def validate_input_command(obj: Any, *, max_type_chars: int = 512) -> dict[str, 
             raise InputValidationError("bad_range")
     elif op == "mouse_move":
         _exact(obj, {"op", "dx", "dy", "wheel"})
-        for name in ("dx", "dy", "wheel"):
+        for name in ("dx", "dy"):
             value = obj[name]
-            if not _is_int(value) or not -127 <= value <= 127:
+            if (
+                not _is_int(value)
+                or not -GATEWAY_MOUSE_AXIS_LIMIT
+                <= value
+                <= GATEWAY_MOUSE_AXIS_LIMIT
+            ):
                 raise InputValidationError("bad_range")
+        wheel = obj["wheel"]
+        if (
+            not _is_int(wheel)
+            or not -GATEWAY_MOUSE_WHEEL_LIMIT
+            <= wheel
+            <= GATEWAY_MOUSE_WHEEL_LIMIT
+        ):
+            raise InputValidationError("bad_range")
     elif op == "mouse_button":
         _exact(obj, {"op", "button", "event"})
         if obj["button"] not in MOUSE_BUTTONS:
@@ -127,3 +144,12 @@ def validate_input_command(obj: Any, *, max_type_chars: int = 512) -> dict[str, 
         raise InputValidationError("bad_op")
 
     return dict(obj)
+
+
+def mouse_move_chunk_count(command: dict[str, Any]) -> int:
+    """Return the bounded signed-byte HID report cost of a logical movement."""
+
+    if command.get("op") != "mouse_move":
+        return 1
+    largest = max(abs(command["dx"]), abs(command["dy"]), abs(command["wheel"]))
+    return max(1, (largest + HID_MOUSE_DELTA_LIMIT - 1) // HID_MOUSE_DELTA_LIMIT)

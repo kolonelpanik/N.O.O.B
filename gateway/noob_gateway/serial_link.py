@@ -11,6 +11,7 @@ from typing import Any, Callable
 import serial
 
 from .config import SerialConfig
+from .models import HID_MOUSE_DELTA_LIMIT, MOUSE_MOVE_BATCH_LIMIT
 
 
 PROTOCOL_VERSION = 1
@@ -86,6 +87,37 @@ def _diagnostic_code(exc: BaseException, default: str = "supervisor_error") -> s
 
     code = getattr(exc, "diagnostic_code", None)
     return code if code in _DIAGNOSTIC_CODES else default
+
+
+def _clamp_mouse_delta(value: int) -> int:
+    return max(-HID_MOUSE_DELTA_LIMIT, min(HID_MOUSE_DELTA_LIMIT, value))
+
+
+def _split_mouse_move(operation: dict[str, Any]) -> list[dict[str, Any]]:
+    """Decompose one bounded logical movement into Pico-safe HID reports."""
+
+    remaining_x = operation["dx"]
+    remaining_y = operation["dy"]
+    remaining_wheel = operation["wheel"]
+    chunks: list[dict[str, Any]] = []
+    while remaining_x or remaining_y or remaining_wheel:
+        chunk_x = _clamp_mouse_delta(remaining_x)
+        chunk_y = _clamp_mouse_delta(remaining_y)
+        chunk_wheel = _clamp_mouse_delta(remaining_wheel)
+        chunks.append(
+            {
+                "op": "mouse_move",
+                "dx": chunk_x,
+                "dy": chunk_y,
+                "wheel": chunk_wheel,
+            }
+        )
+        remaining_x -= chunk_x
+        remaining_y -= chunk_y
+        remaining_wheel -= chunk_wheel
+        if len(chunks) > MOUSE_MOVE_BATCH_LIMIT:
+            raise SerialLinkError("mouse movement exceeds batch limit")
+    return chunks or [dict(operation)]
 
 
 class SerialLink:
@@ -181,7 +213,7 @@ class SerialLink:
         *,
         expected_generation: int | None = None,
     ) -> dict[str, Any]:
-        """Send one validated public command, chunking long type operations."""
+        """Send one validated public command, batching bounded logical operations."""
 
         async with self._queue_count_lock:
             if self._queued_commands >= self.config.max_pending_commands:
@@ -209,6 +241,22 @@ class SerialLink:
                         last = await self._send_operation(
                             operation, expected_generation=generation
                         )
+                    return {"chunks": len(chunks), "pico": last}
+                if command["op"] == "mouse_move":
+                    chunks = _split_mouse_move(command)
+                    if generation != self._abort_generation:
+                        raise SerialInterrupted(
+                            "input operation interrupted by emergency release"
+                        )
+                    if len(chunks) == 1:
+                        last = await self._send_operation(
+                            chunks[0], expected_generation=generation
+                        )
+                    else:
+                        acknowledgements = await self._send_mouse_batch(
+                            chunks, expected_generation=generation
+                        )
+                        last = acknowledgements[-1]
                     return {"chunks": len(chunks), "pico": last}
                 if generation != self._abort_generation:
                     raise SerialInterrupted("input operation interrupted by emergency release")
@@ -473,6 +521,166 @@ class SerialLink:
             expected_generation=expected_generation,
         )
 
+    async def _send_mouse_batch(
+        self,
+        operations: list[dict[str, Any]],
+        *,
+        expected_generation: int,
+    ) -> list[dict[str, Any]]:
+        """Pipeline a bounded mouse-only burst while preserving public ordering."""
+
+        if not 2 <= len(operations) <= MOUSE_MOVE_BATCH_LIMIT:
+            raise SerialLinkError("invalid mouse batch size")
+        if any(operation.get("op") != "mouse_move" for operation in operations):
+            raise SerialLinkError("mouse batch contains an invalid operation")
+        sequences = [self._next_sequence() for _ in operations]
+        return await self._exchange_mouse_batch(
+            operations,
+            sequences=sequences,
+            expected_generation=expected_generation,
+        )
+
+    async def _exchange_mouse_batch(
+        self,
+        operations: list[dict[str, Any]],
+        *,
+        sequences: list[int],
+        expected_generation: int,
+    ) -> list[dict[str, Any]]:
+        """Write multiple idempotent mouse reports and await one shared ACK window."""
+
+        if not self.ready:
+            raise SerialUnavailable("serial session is not ready")
+        if self._serial is None or self._session_id is None:
+            raise SerialUnavailable("serial port is not open")
+        if len(operations) != len(sequences):
+            raise SerialLinkError("mouse batch sequence mismatch")
+
+        serial_port = self._serial
+        session_id = self._session_id
+        timeout = self.config.ack_timeout_ms / 1000.0
+        encoded_items: list[tuple[int, bytes]] = []
+        for operation, sequence in zip(operations, sequences, strict=True):
+            payload = {
+                "v": PROTOCOL_VERSION,
+                "sid": session_id,
+                "seq": sequence,
+                **operation,
+            }
+            encoded = (
+                json.dumps(payload, separators=(",", ":"), ensure_ascii=True) + "\n"
+            ).encode("ascii")
+            if len(encoded) > MAX_LINE_BYTES:
+                raise _ProtocolFault(
+                    "outbound_line_too_long", "outbound protocol line is too long"
+                )
+            encoded_items.append((sequence, encoded))
+
+        async with self._wire_lock:
+            if expected_generation != self._abort_generation:
+                raise SerialInterrupted("input operation interrupted by emergency release")
+            if not self.ready:
+                raise SerialUnavailable("serial session is not ready")
+            if self._serial is not serial_port or self._session_id != session_id:
+                raise SerialUnavailable("serial session changed while command was queued")
+
+            loop = asyncio.get_running_loop()
+            futures = {
+                sequence: loop.create_future() for sequence, _encoded in encoded_items
+            }
+            self._pending.update(futures)
+            try:
+                for attempt in range(2):
+                    if expected_generation != self._abort_generation:
+                        raise SerialInterrupted(
+                            "input operation interrupted by emergency release"
+                        )
+                    if self._serial is not serial_port or self._session_id != session_id:
+                        raise SerialUnavailable("serial session changed during command")
+                    if not self.ready:
+                        raise SerialUnavailable("serial session is not ready")
+
+                    unresolved = [
+                        (sequence, encoded)
+                        for sequence, encoded in encoded_items
+                        if not futures[sequence].done()
+                    ]
+                    if not unresolved:
+                        break
+                    outbound = b"".join(encoded for _sequence, encoded in unresolved)
+                    try:
+                        written = await asyncio.to_thread(serial_port.write, outbound)
+                    except (serial.SerialException, OSError) as exc:
+                        self._mark_transport_unhealthy(
+                            type(exc).__name__, "serial_write_failed"
+                        )
+                        raise SerialUnavailable("serial write failed") from exc
+                    if written != len(outbound):
+                        self._mark_transport_unhealthy(
+                            "ShortSerialWrite", "short_serial_write"
+                        )
+                        raise SerialLinkError("short serial write")
+
+                    waiting = [
+                        future for future in futures.values() if not future.done()
+                    ]
+                    if waiting:
+                        await asyncio.wait(
+                            waiting,
+                            timeout=timeout,
+                            return_when=asyncio.ALL_COMPLETED,
+                        )
+
+                    if all(future.done() for future in futures.values()):
+                        completed = [
+                            futures[sequence].result() for sequence in sequences
+                        ]
+                        nack = next(
+                            (
+                                response
+                                for response in completed
+                                if response.get("kind") == "nack"
+                            ),
+                            None,
+                        )
+                        if nack is not None:
+                            self._raise_nack(nack)
+                        break
+                    if expected_generation != self._abort_generation:
+                        raise SerialInterrupted(
+                            "input operation interrupted by emergency release"
+                        )
+                    if attempt == 1:
+                        self._mark_transport_unhealthy("SerialTimeout", "ack_timeout")
+                        raise SerialTimeout("Pico ACK timeout")
+                else:  # pragma: no cover - loop always breaks or raises
+                    raise SerialTimeout("Pico ACK timeout")
+
+                if expected_generation != self._abort_generation:
+                    raise SerialInterrupted(
+                        "input operation interrupted by emergency release"
+                    )
+                for sequence in sequences:
+                    futures[sequence].result()
+            finally:
+                for sequence, future in futures.items():
+                    self._pending.pop(sequence, None)
+                    if not future.done():
+                        future.cancel()
+
+        self._last_ack_at = self._clock()
+        return [
+            {"sid": session_id, "seq": sequence, "kind": "ack"}
+            for sequence in sequences
+        ]
+
+    @staticmethod
+    def _raise_nack(response: dict[str, Any]) -> None:
+        code = response.get("code")
+        if not isinstance(code, str) or len(code) > 32:
+            code = "unknown_nack"
+        raise SerialNack(code, released=response.get("released") is True)
+
     async def _exchange(
         self,
         operation: dict[str, Any],
@@ -548,8 +756,5 @@ class SerialLink:
 
         self._last_ack_at = self._clock()
         if response.get("kind") == "nack":
-            code = response.get("code")
-            if not isinstance(code, str) or len(code) > 32:
-                code = "unknown_nack"
-            raise SerialNack(code, released=response.get("released") is True)
+            self._raise_nack(response)
         return {"sid": session_id, "seq": sequence, "kind": "ack"}

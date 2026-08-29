@@ -120,9 +120,7 @@ class LocalInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.runtime.commands,
             [
-                {"op": "mouse_move", "dx": 127, "dy": -127, "wheel": 0},
-                {"op": "mouse_move", "dx": 127, "dy": -2, "wheel": 0},
-                {"op": "mouse_move", "dx": 46, "dy": 0, "wheel": 0},
+                {"op": "mouse_move", "dx": 300, "dy": -129, "wheel": 0},
             ],
         )
 

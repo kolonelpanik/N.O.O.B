@@ -80,6 +80,15 @@ class FakeSerial:
         return {"kind": "ack", "seq": self.releases}
 
 
+class CaptureRateLimiter:
+    def __init__(self):
+        self.costs = []
+
+    async def allow(self, cost=1):
+        self.costs.append(cost)
+        return True
+
+
 class FakeVideo:
     def __init__(self):
         self.ready = True
@@ -886,6 +895,33 @@ class GatewayAppTests(unittest.IsolatedAsyncioTestCase):
             "/api/v1/input", json={"op": "ping"}, headers=headers
         )
         self.assertEqual(stale.status, 409)
+
+    async def test_aggregate_mouse_move_remains_one_bounded_logical_request(self):
+        lease = await self.claim()
+        headers = {**self.auth, "X-NOOB-Lease": lease}
+        limiter = CaptureRateLimiter()
+        self.runtime.rate_limiter = limiter
+
+        accepted = await self.client.post(
+            "/api/v1/input",
+            json={"op": "mouse_move", "dx": 1016, "dy": -300, "wheel": 0},
+            headers=headers,
+        )
+        self.assertEqual(accepted.status, 200)
+        self.assertEqual(limiter.costs, [1])
+        self.assertEqual(
+            self.serial.sent[-1],
+            {"op": "mouse_move", "dx": 1016, "dy": -300, "wheel": 0},
+        )
+
+        rejected = await self.client.post(
+            "/api/v1/input",
+            json={"op": "mouse_move", "dx": 1017, "dy": 0, "wheel": 0},
+            headers=headers,
+        )
+        self.assertEqual(rejected.status, 400)
+        self.assertEqual((await rejected.json())["error"], "bad_range")
+        self.assertEqual(limiter.costs, [1])
 
     async def test_duplicate_json_key_is_rejected(self):
         lease = await self.claim()

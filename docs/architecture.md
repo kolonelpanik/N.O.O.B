@@ -39,6 +39,11 @@ local-input adapter -------^ (same ControlLease and UART command path)
    filesystem, process, shell, clipboard, or arbitrary USB-report endpoint.
 3. **Serial boundary.** The gateway creates the UART session and sequence
    numbers. The Pico accepts a bounded protocol and acknowledges each command.
+   Human pointer motion may enter the gateway as one tightly bounded aggregate;
+   the gateway decomposes it into no more than eight ordinary signed-byte
+   reports, writes that mouse-only burst together, and awaits every idempotent
+   ACK. Keyboard and button events remain ordering barriers and are never
+   pipelined with movement.
 4. **USB boundary.** The Pico, not the gateway process, emits native USB HID.
    Its independent watchdog releases held input if the serial controller dies.
 5. **Observation boundary.** Frames are held only in memory and are not recorded
@@ -75,6 +80,11 @@ evdev identities to be open. Neither endpoint alone proves a target-side action.
 The optional environmental camera is intentionally absent from this readiness
 decision; its independent proof state and bounded media contract are described
 in [Environmental camera gateway](environment-camera.md).
+
+The reference FT232H uses the identity-pinned udev rule in
+`packaging/99-noob-ftdi-low-latency.rules` to set its Linux `latency_timer` to
+1 ms whenever it appears. The rule does not match arbitrary serial adapters,
+and it does not widen the 115200 8N1 UART protocol or Pico HID limits.
 
 ## Capture output profiles
 

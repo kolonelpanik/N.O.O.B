@@ -74,4 +74,63 @@ describe("bounded input FIFO", () => {
     first.resolve();
     await firstResult;
   });
+
+  it("coalesces adjacent movement without crossing key and button barriers", async () => {
+    const fifo = new BoundedInputFifo();
+    const generation = fifo.invalidate();
+    const blocker = deferred<void>();
+    const delivered: Array<string | { dx: number; dy: number }> = [];
+    const merge = (
+      current: { dx: number; dy: number },
+      next: { dx: number; dy: number },
+    ) => ({ dx: current.dx + next.dx, dy: current.dy + next.dy });
+
+    const active = fifo.enqueue(generation, () => blocker.promise, () => fifo.invalidate());
+    const firstMove = fifo.enqueueCoalesced(
+      generation,
+      "mouse",
+      { dx: 5, dy: -2 },
+      merge,
+      async (movement) => { delivered.push(movement); },
+      () => fifo.invalidate(),
+    );
+    const mergedMove = fifo.enqueueCoalesced(
+      generation,
+      "mouse",
+      { dx: 7, dy: 2 },
+      merge,
+      async (movement) => { delivered.push(movement); },
+      () => fifo.invalidate(),
+    );
+    const key = fifo.enqueue(
+      generation,
+      async () => { delivered.push("key-down"); },
+      () => fifo.invalidate(),
+    );
+    const laterMove = fifo.enqueueCoalesced(
+      generation,
+      "mouse",
+      { dx: 3, dy: 1 },
+      merge,
+      async (movement) => { delivered.push(movement); },
+      () => fifo.invalidate(),
+    );
+    const button = fifo.enqueue(
+      generation,
+      async () => { delivered.push("button-down"); },
+      () => fifo.invalidate(),
+    );
+
+    expect(firstMove).toBe(mergedMove);
+    expect(fifo.pending).toBe(5);
+    blocker.resolve();
+    await Promise.all([active, firstMove, mergedMove, key, laterMove, button]);
+    expect(delivered).toEqual([
+      { dx: 12, dy: 0 },
+      "key-down",
+      { dx: 3, dy: 1 },
+      "button-down",
+    ]);
+    expect(fifo.pending).toBe(0);
+  });
 });

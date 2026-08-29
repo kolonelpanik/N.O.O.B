@@ -7,7 +7,11 @@ import type {
 } from "../../shared/gateway-contract";
 import { noobApi, OperatorApiError } from "../api/noob-client";
 import { BoundedInputFifo } from "../input/input-fifo";
-import { describeInput, mapKeyboardEvent } from "../input/input-mapping";
+import {
+  describeInput,
+  mapKeyboardEvent,
+  mergeGatewayMouseMoves,
+} from "../input/input-mapping";
 
 export type OperatorMode = "human" | "agent";
 export type ConnectionState = "connecting" | "live" | "degraded" | "unauthenticated";
@@ -328,19 +332,30 @@ export function useOperatorController(): OperatorController {
       if (fifo === null) return false;
       const generation = fifo.generation;
       try {
-        const result = await fifo.enqueue(
-          generation,
-          async () => {
-            await noobApi.send(command);
-            if (recordAction && generation === fifo.generation && claimedRef.current) {
-              setLastAction(describeInput(command));
-            }
-            return true;
-          },
-          () => {
-            if (generation === fifo.generation) loseControl("Control lost");
-          },
-        );
+        const execute = async (candidate: GatewayInputCommand) => {
+          await noobApi.send(candidate);
+          if (recordAction && generation === fifo.generation && claimedRef.current) {
+            setLastAction(describeInput(candidate));
+          }
+          return true;
+        };
+        const failClosed = () => {
+          if (generation === fifo.generation) loseControl("Control lost");
+        };
+        const result = command.op === "mouse_move"
+          ? await fifo.enqueueCoalesced(
+              generation,
+              `mouse_move:${recordAction ? "record" : "quiet"}`,
+              command,
+              mergeGatewayMouseMoves,
+              execute,
+              failClosed,
+            )
+          : await fifo.enqueue(
+              generation,
+              () => execute(command),
+              failClosed,
+            );
         return result.executed && result.value === true;
       } catch {
         return false;

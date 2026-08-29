@@ -25,7 +25,10 @@ from .local_input import (
     LocalInputManager,
     LocalInputUnavailable,
 )
-from .models import InputValidationError, validate_input_command
+from .models import (
+    InputValidationError,
+    validate_input_command,
+)
 from .rate_limit import TokenBucket
 from .serial_link import (
     SerialBusy,

@@ -1,6 +1,11 @@
 export type KeyEventKind = "down" | "up";
 export type MouseButton = "left" | "middle" | "right";
 
+export const HID_MOUSE_DELTA_MAX = 127;
+export const MOUSE_MOVE_BATCH_MAX = 8;
+export const GATEWAY_MOUSE_AXIS_MAX = HID_MOUSE_DELTA_MAX * MOUSE_MOVE_BATCH_MAX;
+export const GATEWAY_MOUSE_WHEEL_MAX = HID_MOUSE_DELTA_MAX;
+
 export type GatewayInputCommand =
   | { op: "key"; event: KeyEventKind; key: string }
   | { op: "type"; text: string; interval_ms: number }

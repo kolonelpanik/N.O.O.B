@@ -35,6 +35,11 @@ Acceptance separates transport evidence from visible target behavior.
   keys, out-of-range mouse movement, and stale sessions.
 - Replay one identical `(sid, seq)` request and prove it does not repeat the HID
   action.
+- Send one maximum bounded aggregate movement and verify it becomes no more than
+  eight signed-byte UART reports, all reports are acknowledged, component sums
+  equal the request, and any lost ACK is retried with the same `(sid, seq)`.
+- Replug the verified FT232H and confirm its sysfs `latency_timer` returns to
+  `1` without relying on a volatile `ttyUSBN` name.
 
 ## Target-visible HID
 

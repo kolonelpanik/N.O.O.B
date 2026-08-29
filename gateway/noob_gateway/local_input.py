@@ -17,6 +17,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from .config import LocalInputConfig
+from .models import GATEWAY_MOUSE_AXIS_LIMIT
 
 
 # linux/input-event-codes.h (the uConsole appliance is Linux/aarch64).
@@ -535,8 +536,14 @@ class LocalInputManager:
         self._motion_x = 0
         self._motion_y = 0
         while dx or dy:
-            chunk_x = max(-127, min(127, dx))
-            chunk_y = max(-127, min(127, dy))
+            chunk_x = max(
+                -GATEWAY_MOUSE_AXIS_LIMIT,
+                min(GATEWAY_MOUSE_AXIS_LIMIT, dx),
+            )
+            chunk_y = max(
+                -GATEWAY_MOUSE_AXIS_LIMIT,
+                min(GATEWAY_MOUSE_AXIS_LIMIT, dy),
+            )
             if not await self._submit_locked(
                 {"op": "mouse_move", "dx": chunk_x, "dy": chunk_y, "wheel": 0}
             ):

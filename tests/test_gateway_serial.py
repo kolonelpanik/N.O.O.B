@@ -37,6 +37,8 @@ class MemorySerial:
         malformed_with_ack_op=None,
         protocol_before_ack_op=None,
         event_after_op=None,
+        nack_first_op=None,
+        drop_after_first_op=None,
         **_kwargs,
     ):
         self.nack_op = nack_op
@@ -50,13 +52,17 @@ class MemorySerial:
         self.malformed_with_ack_op = malformed_with_ack_op
         self.protocol_before_ack_op = protocol_before_ack_op
         self.event_after_op = event_after_op
+        self.nack_first_op = nack_first_op
+        self.drop_after_first_op = drop_after_first_op
         self.dropped = False
         self.raised = False
         self.fragmented = False
         self.responses = queue.Queue()
         self.writes = []
+        self.write_calls = []
         self.executed = []
         self._executed_ids = set()
+        self._op_counts = {}
         self.closed = False
 
     def reset_input_buffer(self):
@@ -71,8 +77,15 @@ class MemorySerial:
             return b""
 
     def write(self, data):
-        message = json.loads(data.decode("ascii"))
+        self.write_calls.append(data)
+        for line in data.decode("ascii").splitlines():
+            self._handle_message(json.loads(line))
+        return len(data)
+
+    def _handle_message(self, message):
         self.writes.append(message)
+        self._op_counts[message["op"]] = self._op_counts.get(message["op"], 0) + 1
+        op_count = self._op_counts[message["op"]]
         if message["op"] == self.raise_once_op and not self.raised:
             self.raised = True
             raise pyserial.SerialException("simulated serial write failure")
@@ -81,11 +94,15 @@ class MemorySerial:
             self._executed_ids.add(command_id)
             self.executed.append(message)
         if message["op"] == self.drop_all_op:
-            return len(data)
+            return
         if message["op"] == self.drop_first_op and not self.dropped:
             self.dropped = True
-            return len(data)
-        if message["op"] == self.nack_op:
+            return
+        if message["op"] == self.drop_after_first_op and op_count > 1:
+            return
+        if message["op"] == self.nack_op or (
+            message["op"] == self.nack_first_op and op_count == 1
+        ):
             response = {
                 "v": 1,
                 "kind": "nack",
@@ -131,7 +148,6 @@ class MemorySerial:
             self.responses.put(encoded)
         if message["op"] == self.event_after_op:
             self.responses.put((json.dumps(event) + "\n").encode("utf-8"))
-        return len(data)
 
     def close(self):
         self.closed = True
@@ -184,6 +200,150 @@ class SerialLinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([len(item["text"]) for item in type_writes], [32, 32, 1])
         await link.emergency_release()
         self.assertIn("release_all", [item["op"] for item in fake.writes])
+        await link.stop()
+
+    async def test_mouse_movement_is_pipelined_in_one_bounded_uart_write(self):
+        fake = MemorySerial()
+        link = SerialLink(self.config(), serial_factory=lambda **kwargs: fake)
+        await link.start()
+        await link.wait_ready(1.0)
+
+        result = await link.send_command(
+            {"op": "mouse_move", "dx": 300, "dy": -260, "wheel": 127}
+        )
+
+        movements = [item for item in fake.writes if item["op"] == "mouse_move"]
+        self.assertEqual(
+            [(item["dx"], item["dy"], item["wheel"]) for item in movements],
+            [(127, -127, 127), (127, -127, 0), (46, -6, 0)],
+        )
+        self.assertEqual(len({item["seq"] for item in movements}), 3)
+        self.assertEqual(result["chunks"], 3)
+        movement_calls = [
+            call
+            for call in fake.write_calls
+            if b'"op":"mouse_move"' in call
+        ]
+        self.assertEqual(len(movement_calls), 1)
+        self.assertEqual(movement_calls[0].count(b"\n"), 3)
+        await link.stop()
+
+    async def test_mouse_batch_retry_reuses_only_the_unresolved_sequence(self):
+        fake = MemorySerial(drop_first_op="mouse_move")
+        link = SerialLink(self.config(), serial_factory=lambda **kwargs: fake)
+        await link.start()
+        await link.wait_ready(1.0)
+
+        result = await link.send_command(
+            {"op": "mouse_move", "dx": 254, "dy": 0, "wheel": 0}
+        )
+
+        movements = [item for item in fake.writes if item["op"] == "mouse_move"]
+        self.assertEqual(len(movements), 3)
+        self.assertEqual(movements[0]["seq"], movements[2]["seq"])
+        self.assertNotEqual(movements[0]["seq"], movements[1]["seq"])
+        executed = [item for item in fake.executed if item["op"] == "mouse_move"]
+        self.assertEqual(len(executed), 2)
+        self.assertEqual(result["chunks"], 2)
+        self.assertTrue(link.ready)
+        await link.stop()
+
+    async def test_mouse_batch_timeout_fails_closed_and_cleans_pending(self):
+        fake = MemorySerial(drop_all_op="mouse_move")
+        link = SerialLink(
+            self.config(reconnect_ms=5000),
+            serial_factory=lambda **kwargs: fake,
+        )
+        await link.start()
+        await link.wait_ready(1.0)
+        generation = link.generation
+
+        with self.assertRaises(SerialTimeout):
+            await link.send_command(
+                {"op": "mouse_move", "dx": 254, "dy": 0, "wheel": 0}
+            )
+
+        movements = [item for item in fake.writes if item["op"] == "mouse_move"]
+        self.assertEqual(len(movements), 4)
+        self.assertEqual(
+            [(item["sid"], item["seq"]) for item in movements[:2]],
+            [(item["sid"], item["seq"]) for item in movements[2:]],
+        )
+        self.assertFalse(link.ready)
+        self.assertGreater(link.generation, generation)
+        self.assertEqual(link._pending, {})
+        await link.stop()
+
+    async def test_mouse_batch_nack_is_bounded_and_cleans_pending(self):
+        fake = MemorySerial(nack_op="mouse_move")
+        link = SerialLink(self.config(), serial_factory=lambda **kwargs: fake)
+        await link.start()
+        await link.wait_ready(1.0)
+
+        with self.assertRaisesRegex(SerialNack, "test_nack"):
+            await link.send_command(
+                {"op": "mouse_move", "dx": 254, "dy": 0, "wheel": 0}
+            )
+
+        self.assertEqual(link._pending, {})
+        self.assertTrue(link.ready)
+        self.assertEqual(
+            len([item for item in fake.writes if item["op"] == "mouse_move"]),
+            2,
+        )
+        await link.stop()
+
+    async def test_partial_batch_nack_with_missing_ack_fails_as_timeout(self):
+        fake = MemorySerial(
+            nack_first_op="mouse_move",
+            drop_after_first_op="mouse_move",
+        )
+        link = SerialLink(
+            self.config(reconnect_ms=5000),
+            serial_factory=lambda **kwargs: fake,
+        )
+        await link.start()
+        await link.wait_ready(1.0)
+
+        with self.assertRaises(SerialTimeout):
+            await link.send_command(
+                {"op": "mouse_move", "dx": 254, "dy": 0, "wheel": 0}
+            )
+
+        movements = [item for item in fake.writes if item["op"] == "mouse_move"]
+        self.assertEqual(len(movements), 3)
+        self.assertNotEqual(movements[0]["seq"], movements[1]["seq"])
+        self.assertEqual(movements[1]["seq"], movements[2]["seq"])
+        self.assertFalse(link.ready)
+        self.assertEqual(link._pending, {})
+        await link.stop()
+
+    async def test_emergency_release_interrupts_mouse_batch_before_retry(self):
+        fake = MemorySerial(drop_all_op="mouse_move")
+        link = SerialLink(self.config(), serial_factory=lambda **kwargs: fake)
+        await link.start()
+        await link.wait_ready(1.0)
+
+        movement = asyncio.create_task(
+            link.send_command(
+                {"op": "mouse_move", "dx": 254, "dy": 0, "wheel": 0}
+            )
+        )
+        for _ in range(50):
+            if len(
+                [item for item in fake.writes if item["op"] == "mouse_move"]
+            ) == 2:
+                break
+            await asyncio.sleep(0.005)
+        release = asyncio.create_task(link.emergency_release())
+
+        with self.assertRaises(SerialInterrupted):
+            await movement
+        await release
+
+        operations = [item["op"] for item in fake.writes if item["op"] != "session"]
+        self.assertEqual(operations, ["mouse_move", "mouse_move", "release_all"])
+        self.assertEqual(link._pending, {})
         await link.stop()
 
     async def test_retry_reuses_sequence(self):
