@@ -242,11 +242,14 @@ installer. Bring up each proof layer deliberately:
 6. **Start the operator.** Establish a verified SSH forward, then follow
    [`operator/README.md`](operator/README.md) to build and launch the Electron
    app.
-7. **Enable optional discovery.** Keep manual private-address pairing as the
+7. **Install the independent recovery lane.** Keep `usb0` reachable through
+   `systemd-networkd` while NetworkManager owns Wi-Fi by following
+   [Appliance network resilience](docs/appliance-network-resilience.md).
+8. **Enable optional discovery.** Keep manual private-address pairing as the
    fallback, or install the bounded `_noob-kvm._tcp` SSH advertisement using
    [Appliance discovery](docs/appliance-discovery.md). Discovery never replaces
    independent host-key verification.
-8. **Prove the target.** Complete the acceptance ladder with a blank document
+9. **Prove the target.** Complete the acceptance ladder with a blank document
    and harmless input. Do not equate device enumeration or an ACK with a
    target-visible result.
 

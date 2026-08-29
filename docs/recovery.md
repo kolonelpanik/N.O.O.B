@@ -1,5 +1,27 @@
 # Recovery
 
+## NetworkManager unavailable
+
+The reference appliance keeps `usb0` under `systemd-networkd` so the SSH and
+mDNS recovery path does not depend on NetworkManager. Do not add a remembered
+static address or reuse a manually guessed prefix. Verify the independent lane
+first:
+
+```bash
+systemctl status systemd-networkd.service --no-pager
+networkctl status usb0 --no-pager
+ip -brief address show usb0
+ip -4 route show dev usb0
+ip -6 route show dev usb0
+avahi-browse --resolve --terminate _noob-kvm._tcp
+```
+
+With USB carrier, addressing must come from DHCP or IPv6 link-local/RA and its
+learned routes must use metric 100 without contributing DNS. `wlan0` remains a
+NetworkManager device. Follow [Appliance network resilience](appliance-network-resilience.md)
+for installation, same-subnet route proof, unplug/replug acceptance, and
+scoped rollback.
+
 ## Appliance discovery unavailable or stale
 
 Discovery is not a control-plane dependency. If `_noob-kvm._tcp` is absent,

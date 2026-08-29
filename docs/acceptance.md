@@ -101,6 +101,17 @@ visible frame or target Accessibility readback is the separate acceptance proof.
 - Stop `noob-discovery.service`; require scan results to expire while manual
   private-address pairing remains usable. Confirm `_noobcam._tcp`, target
   video/HID, the local console, and existing SSH sessions are unaffected.
+- If the independent recovery lane is installed, require `networkctl status
+  usb0` to name the N.O.O.B. network file and NetworkManager to report only
+  `usb0` unmanaged. With USB and Wi-Fi on the same subnet, require `ip route
+  get` for the USB-side operator to select `usb0` at metric 100. Stop
+  NetworkManager and prove the existing USB SSH session plus mDNS remain
+  usable; restart it, then unplug USB and prove Wi-Fi remains usable without a
+  stale USB route. Reconnect USB and require automatic DHCP or IPv6 link-local
+  recovery without a manual address command. When the installer introduced
+  networkd on the reference appliance, require
+  `systemd-networkd-wait-online.service` disabled so an absent recovery cable
+  cannot delay `network-online.target`.
 - Missing/incorrect tokens, oversized bodies, invalid content types, and absent
   controller leases must fail closed.
 - Logs may contain operation names, byte counts, latency, and result codes, but

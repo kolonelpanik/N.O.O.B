@@ -1,0 +1,5 @@
+# Managed by N.O.O.B. USB recovery installer. Do not edit in place.
+# NetworkManager continues to own wlan0 and every device not matched here.
+[device-noob-usb-recovery]
+match-device=interface-name:__NOOB_USB_INTERFACE__
+managed=0

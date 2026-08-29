@@ -29,6 +29,12 @@ The environmental ESP32-CAM remains a different device and advertises
 uConsole SSH endpoint, and the uConsole never republishes the camera's bearer
 or private upstream address.
 
+For an appliance recovery path that remains available when NetworkManager is
+unhealthy, install the exact `usb0` ownership split in
+[Appliance network resilience](appliance-network-resilience.md). Discovery
+continues to use the same bounded service and independent host-key proof on
+that interface; it does not expose the loopback gateway.
+
 ## Install on the uConsole
 
 This is a packaging procedure; the repository does not automatically mutate a
